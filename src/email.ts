@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer'
+import type Mail from 'nodemailer/lib/mailer'
 import type { SdPacket, IngestionRecord, UserRole } from './db'
 
 function getTransporter() {
@@ -70,29 +71,84 @@ export async function sendPacketReceivedEmail(packet: SdPacket) {
   const to = packet.poc_emails.split(',').map(e => e.trim()).filter(Boolean)
   if (!to.length) return
   const t = getTransporter()
+
+  // Build CID attachment if a photo is present
+  const attachments: Mail.Attachment[] = []
+  let photoHtml = ''
+
+  if (packet.photo_url) {
+    // photo_url is a data URL like "data:image/jpeg;base64,/9j/..."
+    const match = packet.photo_url.match(/^data:(image\/\w+);base64,(.+)$/)
+    if (match) {
+      const mimeType  = match[1]               // e.g. image/jpeg
+      const base64    = match[2]
+      const ext       = mimeType.split('/')[1] // e.g. jpeg
+      const filename  = `package-photo.${ext}`
+      attachments.push({
+        filename,
+        content:     Buffer.from(base64, 'base64'),
+        cid:         'package-photo',
+        contentType: mimeType,
+      })
+      photoHtml = `
+        <div style="margin-top:20px;">
+          <p style="margin:0 0 8px;font-size:13px;font-weight:600;color:#374151;">Package Photo</p>
+          <img src="cid:package-photo" alt="Package photo"
+            style="max-width:100%;max-height:400px;border:1px solid #e2e8f0;border-radius:4px;display:block;" />
+        </div>`
+    }
+  }
+
   await t.sendMail({
-    from:    process.env.SMTP_FROM ?? process.env.SMTP_USER,
-    to:      to.join(', '),
-    subject: `[SD Card Tracker] SD Cards Received — ${packet.team_name} (${packet.sd_card_count} cards)`,
+    from:        process.env.SMTP_FROM ?? process.env.SMTP_USER,
+    to:          to.join(', '),
+    subject:     `[Build AI Tracker] SD Cards Received — ${packet.team_name} (${packet.sd_card_count} cards)`,
+    attachments,
     html: `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#f9fafb;padding:24px;border-radius:8px;">
         <div style="background:#1e293b;color:#fff;padding:16px 20px;border-radius:6px 6px 0 0;">
-          <h2 style="margin:0;font-size:16px;">📦 SD Cards Received by Logistics</h2>
+          <h2 style="margin:0;font-size:16px;font-weight:600;">📦 SD Cards Received by Logistics</h2>
         </div>
         <div style="background:#fff;padding:20px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 6px 6px;">
-          <p>The logistics team has logged receipt of SD cards from your team.</p>
+          <p style="margin:0 0 16px;color:#374151;">
+            The logistics team has logged receipt of SD cards from your team.
+          </p>
           <table style="width:100%;border-collapse:collapse;font-size:14px;">
-            <tr style="background:#f1f5f9;"><td style="padding:8px 12px;font-weight:600;width:40%;">Team</td><td style="padding:8px 12px;">${packet.team_name}</td></tr>
-            <tr><td style="padding:8px 12px;font-weight:600;">Factory</td><td style="padding:8px 12px;">${packet.factory}</td></tr>
-            <tr style="background:#f1f5f9;"><td style="padding:8px 12px;font-weight:600;">Date Received</td><td style="padding:8px 12px;">${fmt(packet.date_received)}</td></tr>
-            <tr><td style="padding:8px 12px;font-weight:600;">SD Card Count</td><td style="padding:8px 12px;font-weight:700;font-size:16px;">${packet.sd_card_count}</td></tr>
-            <tr style="background:#f1f5f9;"><td style="padding:8px 12px;font-weight:600;">Logged By</td><td style="padding:8px 12px;">${packet.entered_by}</td></tr>
-            ${packet.notes ? `<tr><td style="padding:8px 12px;font-weight:600;">Notes</td><td style="padding:8px 12px;">${packet.notes}</td></tr>` : ''}
+            <tr style="background:#f1f5f9;">
+              <td style="padding:8px 12px;font-weight:600;width:40%;">Team</td>
+              <td style="padding:8px 12px;">${packet.team_name}</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px;font-weight:600;">Factory</td>
+              <td style="padding:8px 12px;">${packet.factory}</td>
+            </tr>
+            <tr style="background:#f1f5f9;">
+              <td style="padding:8px 12px;font-weight:600;">Date Received</td>
+              <td style="padding:8px 12px;">${fmt(packet.date_received)}</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px;font-weight:600;">SD Card Count</td>
+              <td style="padding:8px 12px;font-weight:700;font-size:16px;color:#1e293b;">${packet.sd_card_count}</td>
+            </tr>
+            <tr style="background:#f1f5f9;">
+              <td style="padding:8px 12px;font-weight:600;">Logged By</td>
+              <td style="padding:8px 12px;">${packet.entered_by}</td>
+            </tr>
+            ${packet.notes ? `
+            <tr>
+              <td style="padding:8px 12px;font-weight:600;">Notes</td>
+              <td style="padding:8px 12px;">${packet.notes}</td>
+            </tr>` : ''}
           </table>
-          <div style="margin-top:16px;padding:12px;background:#fef9c3;border-left:4px solid #f59e0b;border-radius:4px;">
-            <strong>Status: Received</strong> — Awaiting ingestion team acknowledgement.
+          ${photoHtml}
+          <div style="margin-top:20px;padding:12px;background:#fef9c3;border-left:4px solid #f59e0b;border-radius:4px;">
+            <p style="margin:0;font-size:13px;color:#92400e;">
+              <strong>Status: Received</strong> — Awaiting ingestion team acknowledgement.
+            </p>
           </div>
-          <p style="margin-top:16px;font-size:12px;color:#94a3b8;">Automated message from SD Card Tracker.</p>
+          <p style="margin-top:20px;font-size:12px;color:#94a3b8;">
+            Automated message from Build AI Tracker. Please do not reply.
+          </p>
         </div>
       </div>`,
   })

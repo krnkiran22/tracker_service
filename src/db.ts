@@ -32,6 +32,7 @@ export interface SdPacket {
   date_received: string
   sd_card_count: number
   notes?: string | null
+  photo_url?: string | null
   status: PacketStatus
   entered_by: string
   poc_emails: string
@@ -127,11 +128,13 @@ export async function initDB() {
       date_received DATE NOT NULL,
       sd_card_count INT NOT NULL DEFAULT 0,
       notes TEXT,
+      photo_url TEXT,
       status TEXT NOT NULL DEFAULT 'received' CHECK (status IN ('received', 'processing', 'completed')),
       entered_by TEXT NOT NULL,
       poc_emails TEXT NOT NULL DEFAULT '',
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+    ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS photo_url TEXT;
 
     CREATE TABLE IF NOT EXISTS ingestion_records (
       id SERIAL PRIMARY KEY,
@@ -273,9 +276,9 @@ export async function insertPacket(p: Omit<SdPacket, 'id' | 'created_at' | 'stat
   const db = getPool()
   await upsertTeam(p.team_name)
   const res = await db.query(
-    `INSERT INTO sd_packets (team_name, factory, date_received, sd_card_count, notes, entered_by, poc_emails)
-     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-    [p.team_name, p.factory, p.date_received, p.sd_card_count, p.notes ?? null, p.entered_by, p.poc_emails]
+    `INSERT INTO sd_packets (team_name, factory, date_received, sd_card_count, notes, photo_url, entered_by, poc_emails)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+    [p.team_name, p.factory, p.date_received, p.sd_card_count, p.notes ?? null, p.photo_url ?? null, p.entered_by, p.poc_emails]
   )
   return res.rows[0]
 }
