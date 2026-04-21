@@ -5,6 +5,7 @@ import { initDB } from './db'
 import transactionsRouter from './routes/transactions'
 import teamsRouter from './routes/teams'
 import packetsRouter from './routes/packets'
+import authRouter from './routes/auth'
 
 const app = express()
 const PORT = Number(process.env.PORT ?? 4000)
@@ -32,6 +33,7 @@ app.use(express.json({ limit: '10mb' }))   // allow photo data-URLs
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }))
 
 // ── API Routes ────────────────────────────────────────────────────────────────
+app.use('/api/auth',         authRouter)
 app.use('/api/transactions', transactionsRouter)
 app.use('/api/teams',        teamsRouter)
 app.use('/api/packets',      packetsRouter)

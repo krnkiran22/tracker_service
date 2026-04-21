@@ -1,10 +1,29 @@
 import { Pool } from 'pg'
+import crypto from 'crypto'
 import type { Transaction } from './items'
 
 export type { Transaction }
 export { ITEMS } from './items'
 
 export type PacketStatus = 'received' | 'processing' | 'completed'
+export type UserRole = 'admin' | 'logistics' | 'ingestion' | 'user'
+
+export interface AppUser {
+  id: number
+  name: string
+  email: string
+  role: UserRole
+  is_verified: boolean
+  created_at: string
+}
+
+export interface OtpCode {
+  id: number
+  email: string
+  code: string
+  expires_at: string
+  used: boolean
+}
 
 export interface SdPacket {
   id: number
@@ -126,6 +145,24 @@ export async function initDB() {
       ingested_by TEXT NOT NULL,
       deployment_date DATE NOT NULL,
       notes TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS app_users (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('admin', 'logistics', 'ingestion', 'user')),
+      is_verified BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS otp_codes (
+      id SERIAL PRIMARY KEY,
+      email TEXT NOT NULL,
+      code TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
   `)
@@ -298,4 +335,62 @@ export async function getIngestionRecordByPacketId(packetId: number): Promise<In
   const db = getPool()
   const res = await db.query(`SELECT * FROM ingestion_records WHERE packet_id = $1`, [packetId])
   return res.rows[0] ?? null
+}
+
+// ── App Users (OTP auth) ──────────────────────────────────────────────────────
+
+export async function createUser(name: string, email: string, role: UserRole): Promise<AppUser> {
+  const db = getPool()
+  const res = await db.query(
+    `INSERT INTO app_users (name, email, role) VALUES ($1, $2, $3) RETURNING *`,
+    [name, email.toLowerCase().trim(), role]
+  )
+  return res.rows[0]
+}
+
+export async function getUserByEmail(email: string): Promise<AppUser | null> {
+  const db = getPool()
+  const res = await db.query(`SELECT * FROM app_users WHERE email = $1`, [email.toLowerCase().trim()])
+  return res.rows[0] ?? null
+}
+
+export async function verifyUser(email: string): Promise<void> {
+  const db = getPool()
+  await db.query(`UPDATE app_users SET is_verified = true WHERE email = $1`, [email.toLowerCase().trim()])
+}
+
+// ── OTP Codes ─────────────────────────────────────────────────────────────────
+
+export function generateOtp(): string {
+  return String(crypto.randomInt(100000, 999999))
+}
+
+export async function createOtp(email: string): Promise<string> {
+  const db = getPool()
+  const code = generateOtp()
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
+
+  // Invalidate any existing unused OTPs for this email
+  await db.query(`UPDATE otp_codes SET used = true WHERE email = $1 AND used = false`, [email.toLowerCase().trim()])
+
+  await db.query(
+    `INSERT INTO otp_codes (email, code, expires_at) VALUES ($1, $2, $3)`,
+    [email.toLowerCase().trim(), code, expiresAt]
+  )
+  return code
+}
+
+export async function verifyOtp(email: string, code: string): Promise<boolean> {
+  const db = getPool()
+  const res = await db.query(
+    `SELECT * FROM otp_codes
+     WHERE email = $1 AND code = $2 AND used = false AND expires_at > NOW()
+     ORDER BY created_at DESC LIMIT 1`,
+    [email.toLowerCase().trim(), code.trim()]
+  )
+  if (!res.rows[0]) return false
+
+  // Mark as used
+  await db.query(`UPDATE otp_codes SET used = true WHERE id = $1`, [res.rows[0].id])
+  return true
 }

@@ -1,5 +1,5 @@
 import nodemailer from 'nodemailer'
-import type { SdPacket, IngestionRecord } from './db'
+import type { SdPacket, IngestionRecord, UserRole } from './db'
 
 function getTransporter() {
   return nodemailer.createTransport({
@@ -10,6 +10,55 @@ function getTransporter() {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS,
     },
+    tls: { rejectUnauthorized: false },
+  })
+}
+
+const ROLE_LABEL: Record<UserRole, string> = {
+  admin:     'Admin',
+  logistics: 'Logistics',
+  ingestion: 'Ingestion Team',
+  user:      'Viewer',
+}
+
+// ─── OTP Email ────────────────────────────────────────────────────────────────
+
+export async function sendOtpEmail(email: string, otp: string, name: string, type: 'signup' | 'login') {
+  const t = getTransporter()
+  const subject = type === 'signup'
+    ? `[Build AI Tracker] Your sign-up verification code: ${otp}`
+    : `[Build AI Tracker] Your login code: ${otp}`
+
+  const action = type === 'signup' ? 'complete your sign-up' : 'log in to your account'
+
+  await t.sendMail({
+    from:    process.env.SMTP_FROM ?? process.env.SMTP_USER,
+    to:      email,
+    subject,
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;background:#f9fafb;padding:24px;border-radius:8px;">
+        <div style="background:#1e293b;color:#fff;padding:16px 20px;border-radius:6px 6px 0 0;">
+          <h2 style="margin:0;font-size:16px;font-weight:600;">Build AI Tracker</h2>
+        </div>
+        <div style="background:#fff;padding:28px 24px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 6px 6px;">
+          <p style="margin:0 0 8px;color:#374151;font-size:15px;">Hi ${name},</p>
+          <p style="margin:0 0 24px;color:#374151;font-size:14px;">
+            Use the verification code below to ${action}.
+            This code expires in <strong>10 minutes</strong>.
+          </p>
+          <div style="text-align:center;margin:0 0 24px;">
+            <span style="display:inline-block;background:#1e293b;color:#fff;font-size:32px;font-weight:700;letter-spacing:12px;padding:16px 32px;border-radius:6px;font-family:monospace;">
+              ${otp}
+            </span>
+          </div>
+          <p style="margin:0 0 4px;font-size:12px;color:#94a3b8;text-align:center;">
+            If you didn't request this, you can safely ignore this email.
+          </p>
+          <p style="margin:0;font-size:12px;color:#cbd5e1;text-align:center;">
+            Build AI Tracker · Automated notification
+          </p>
+        </div>
+      </div>`,
   })
 }
 
