@@ -33,6 +33,7 @@ export interface SdPacket {
   sd_card_count: number
   notes?: string | null
   photo_url?: string | null
+  photo_urls?: string | null   // JSON array of data-URL strings
   status: PacketStatus
   entered_by: string
   poc_emails: string
@@ -59,6 +60,7 @@ export interface TeamWithPoc {
   name: string
   poc_name?: string | null
   poc_email?: string | null
+  poc_emails?: string | null  // comma-separated default emails for this team
 }
 
 // ── Pool ──────────────────────────────────────────────────────────────────────
@@ -96,10 +98,12 @@ export async function initDB() {
       name TEXT UNIQUE NOT NULL,
       poc_name TEXT,
       poc_email TEXT,
+      poc_emails TEXT NOT NULL DEFAULT '',
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
     ALTER TABLE teams ADD COLUMN IF NOT EXISTS poc_name TEXT;
     ALTER TABLE teams ADD COLUMN IF NOT EXISTS poc_email TEXT;
+    ALTER TABLE teams ADD COLUMN IF NOT EXISTS poc_emails TEXT NOT NULL DEFAULT '';
 
     CREATE TABLE IF NOT EXISTS transactions (
       id SERIAL PRIMARY KEY,
@@ -129,12 +133,14 @@ export async function initDB() {
       sd_card_count INT NOT NULL DEFAULT 0,
       notes TEXT,
       photo_url TEXT,
+      photo_urls TEXT,
       status TEXT NOT NULL DEFAULT 'received' CHECK (status IN ('received', 'processing', 'completed')),
       entered_by TEXT NOT NULL,
       poc_emails TEXT NOT NULL DEFAULT '',
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
     ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS photo_url TEXT;
+    ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS photo_urls TEXT;
 
     CREATE TABLE IF NOT EXISTS ingestion_records (
       id SERIAL PRIMARY KEY,
@@ -173,9 +179,17 @@ export async function initDB() {
 
 // ── Teams ─────────────────────────────────────────────────────────────────────
 
-export async function upsertTeam(name: string) {
+export async function upsertTeam(name: string, poc_emails?: string) {
   const db = getPool()
-  await db.query(`INSERT INTO teams (name) VALUES ($1) ON CONFLICT (name) DO NOTHING`, [name])
+  if (poc_emails !== undefined) {
+    await db.query(
+      `INSERT INTO teams (name, poc_emails) VALUES ($1, $2)
+       ON CONFLICT (name) DO UPDATE SET poc_emails = $2`,
+      [name, poc_emails]
+    )
+  } else {
+    await db.query(`INSERT INTO teams (name) VALUES ($1) ON CONFLICT (name) DO NOTHING`, [name])
+  }
 }
 
 export async function getTeams(): Promise<string[]> {
@@ -184,9 +198,15 @@ export async function getTeams(): Promise<string[]> {
   return res.rows.map((r: { name: string }) => r.name)
 }
 
+export async function getTeamsWithEmails(): Promise<{ name: string; poc_emails: string }[]> {
+  const db = getPool()
+  const res = await db.query(`SELECT name, poc_emails FROM teams ORDER BY name ASC`)
+  return res.rows
+}
+
 export async function getTeamsWithPoc(): Promise<TeamWithPoc[]> {
   const db = getPool()
-  const res = await db.query(`SELECT id, name, poc_name, poc_email FROM teams ORDER BY name ASC`)
+  const res = await db.query(`SELECT id, name, poc_name, poc_email, poc_emails FROM teams ORDER BY name ASC`)
   return res.rows
 }
 
@@ -274,11 +294,20 @@ export async function getTransactions(filters?: {
 
 export async function insertPacket(p: Omit<SdPacket, 'id' | 'created_at' | 'status'>): Promise<SdPacket> {
   const db = getPool()
-  await upsertTeam(p.team_name)
+  // Save poc_emails back to the team so they auto-fill next time
+  await upsertTeam(p.team_name, p.poc_emails || '')
   const res = await db.query(
-    `INSERT INTO sd_packets (team_name, factory, date_received, sd_card_count, notes, photo_url, entered_by, poc_emails)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-    [p.team_name, p.factory, p.date_received, p.sd_card_count, p.notes ?? null, p.photo_url ?? null, p.entered_by, p.poc_emails]
+    `INSERT INTO sd_packets
+       (team_name, factory, date_received, sd_card_count, notes, photo_url, photo_urls, entered_by, poc_emails)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+    [
+      p.team_name, p.factory, p.date_received, p.sd_card_count,
+      p.notes ?? null,
+      p.photo_url ?? null,
+      p.photo_urls ?? null,
+      p.entered_by,
+      p.poc_emails,
+    ]
   )
   return res.rows[0]
 }

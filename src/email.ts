@@ -72,31 +72,46 @@ export async function sendPacketReceivedEmail(packet: SdPacket) {
   if (!to.length) return
   const t = getTransporter()
 
-  // Build CID attachment if a photo is present
+  // Build CID attachments for all photos
   const attachments: Mail.Attachment[] = []
   let photoHtml = ''
 
-  if (packet.photo_url) {
-    // photo_url is a data URL like "data:image/jpeg;base64,/9j/..."
-    const match = packet.photo_url.match(/^data:(image\/\w+);base64,(.+)$/)
-    if (match) {
-      const mimeType  = match[1]               // e.g. image/jpeg
-      const base64    = match[2]
-      const ext       = mimeType.split('/')[1] // e.g. jpeg
-      const filename  = `package-photo.${ext}`
-      attachments.push({
-        filename,
-        content:     Buffer.from(base64, 'base64'),
-        cid:         'package-photo',
-        contentType: mimeType,
-      })
-      photoHtml = `
-        <div style="margin-top:20px;">
-          <p style="margin:0 0 8px;font-size:13px;font-weight:600;color:#374151;">Package Photo</p>
-          <img src="cid:package-photo" alt="Package photo"
-            style="max-width:100%;max-height:400px;border:1px solid #e2e8f0;border-radius:4px;display:block;" />
-        </div>`
-    }
+  // Prefer photo_urls (JSON array) over legacy photo_url
+  const rawUrls: string[] = []
+  if (packet.photo_urls) {
+    try { rawUrls.push(...JSON.parse(packet.photo_urls)) } catch { /* ignore parse errors */ }
+  } else if (packet.photo_url) {
+    rawUrls.push(packet.photo_url)
+  }
+
+  rawUrls.forEach((dataUrl, idx) => {
+    const match = dataUrl.match(/^data:(image\/\w+);base64,(.+)$/)
+    if (!match) return
+    const mimeType = match[1]
+    const base64   = match[2]
+    const ext      = mimeType.split('/')[1]
+    const cid      = `package-photo-${idx}`
+    attachments.push({
+      filename:    `package-photo-${idx + 1}.${ext}`,
+      content:     Buffer.from(base64, 'base64'),
+      cid,
+      contentType: mimeType,
+    })
+    photoHtml += `
+      <div style="margin-bottom:12px;">
+        <img src="cid:${cid}" alt="Package photo ${idx + 1}"
+          style="max-width:100%;max-height:400px;border:1px solid #e2e8f0;border-radius:4px;display:block;" />
+      </div>`
+  })
+
+  if (photoHtml) {
+    photoHtml = `
+      <div style="margin-top:20px;">
+        <p style="margin:0 0 10px;font-size:13px;font-weight:600;color:#374151;">
+          Package Photo${rawUrls.length > 1 ? 's' : ''} (${rawUrls.length})
+        </p>
+        ${photoHtml}
+      </div>`
   }
 
   await t.sendMail({

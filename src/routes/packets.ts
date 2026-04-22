@@ -27,13 +27,14 @@ router.get('/', async (req: Request, res: Response) => {
 // POST /api/packets
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { team_name, factory, date_received, sd_card_count, notes, photo_url, entered_by, poc_emails } = req.body
+    const { team_name, factory, date_received, sd_card_count, notes, photo_url, photo_urls, entered_by, poc_emails } = req.body
 
     if (!team_name || !factory || !date_received || !entered_by) {
       res.status(400).json({ error: 'Missing required fields' })
       return
     }
 
+    // photo_urls is a JSON-stringified string[] from the frontend
     const packet = await insertPacket({
       team_name,
       factory,
@@ -41,6 +42,7 @@ router.post('/', async (req: Request, res: Response) => {
       sd_card_count: Number(sd_card_count) || 0,
       notes:         notes || null,
       photo_url:     photo_url || null,
+      photo_urls:    photo_urls || null,
       entered_by,
       poc_emails:    poc_emails || '',
     })

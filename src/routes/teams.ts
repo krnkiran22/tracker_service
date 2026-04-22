@@ -1,12 +1,12 @@
 import { Router, Request, Response } from 'express'
-import { getTeams, upsertTeam } from '../db'
+import { getTeamsWithEmails, upsertTeam } from '../db'
 
 const router = Router()
 
-// GET /api/teams
+// GET /api/teams — returns [{ name, poc_emails }]
 router.get('/', async (_req: Request, res: Response) => {
   try {
-    const teams = await getTeams()
+    const teams = await getTeamsWithEmails()
     res.json(teams)
   } catch (err) {
     console.error('GET /api/teams error:', err)
@@ -17,9 +17,9 @@ router.get('/', async (_req: Request, res: Response) => {
 // POST /api/teams
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { name } = req.body
+    const { name, poc_emails } = req.body
     if (!name?.trim()) { res.status(400).json({ error: 'name required' }); return }
-    await upsertTeam(String(name).trim())
+    await upsertTeam(String(name).trim(), poc_emails ?? '')
     res.json({ success: true })
   } catch (err) {
     res.status(500).json({ error: String(err) })
