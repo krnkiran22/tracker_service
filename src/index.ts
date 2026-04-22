@@ -41,6 +41,23 @@ app.use('/api/packets',      packetsRouter)
 // ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }))
 
+// ── Self-ping — keeps Railway from sleeping (every 14 minutes) ────────────────
+function startKeepAlive() {
+  const selfUrl = process.env.SELF_URL ?? `https://trackerservice-production.up.railway.app`
+  const INTERVAL_MS = 14 * 60 * 1000  // 14 minutes
+
+  setInterval(async () => {
+    try {
+      const res = await fetch(`${selfUrl}/health`)
+      console.log(`[keep-alive] /health → ${res.status}`)
+    } catch (err) {
+      console.warn(`[keep-alive] ping failed:`, err)
+    }
+  }, INTERVAL_MS)
+
+  console.log(`✓ Keep-alive pinging ${selfUrl}/health every 14 min`)
+}
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 async function start() {
   try {
@@ -53,6 +70,7 @@ async function start() {
 
   app.listen(PORT, () => {
     console.log(`✓ Build AI Tracker backend running on port ${PORT}`)
+    startKeepAlive()
   })
 }
 
