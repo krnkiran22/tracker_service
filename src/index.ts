@@ -87,11 +87,10 @@ app.get('/wa-status', (_req, res) => {
   })
 })
 
-app.get('/test-wa', async (req, res) => {
+app.post('/send-wa', async (req, res) => {
   if (!getIsReady()) {
     res.status(503).json({
       ok: false,
-      ready: false,
       qr_pending: !!WhatsAppModule.latestQR,
       message: WhatsAppModule.latestQR
         ? 'QR pending — open /qr to scan first'
@@ -99,11 +98,14 @@ app.get('/test-wa', async (req, res) => {
     })
     return
   }
-  const phone = (req.query.phone as string) || '+919677514444'
-  const text  = (req.query.msg  as string) || '👋 *Build AI Tracker*\n\nWhatsApp bot is live ✅\nHereafter you will receive SD card packet updates here instead of email.'
+  const { phone, message } = req.body as { phone?: string; message?: string }
+  if (!phone || !message) {
+    res.status(400).json({ ok: false, error: 'phone and message are required' })
+    return
+  }
   try {
-    await WhatsAppModule.sendWhatsAppMessage(phone, text)
-    res.json({ ok: true, message: `WhatsApp message sent to ${phone}` })
+    await WhatsAppModule.sendWhatsAppMessage(phone, message)
+    res.json({ ok: true, sent_to: phone })
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err) })
   }
