@@ -5,23 +5,39 @@ import type { SdPacket, IngestionRecord } from './db'
 
 let isReady = false
 
-// Detect the real Chromium binary path — try env var first, then common locations
+// Detect the real Chromium binary — env var → which → nix/store find → throw
 function detectChromium(): string {
-  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-    console.log(`[WhatsApp] Using PUPPETEER_EXECUTABLE_PATH: ${process.env.PUPPETEER_EXECUTABLE_PATH}`)
-    return process.env.PUPPETEER_EXECUTABLE_PATH
+  const envPath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim()
+  if (envPath) {
+    console.log(`[WhatsApp] Using PUPPETEER_EXECUTABLE_PATH: ${envPath}`)
+    return envPath
   }
+
+  // Try which first (covers /usr/bin/chromium and /usr/bin/chromium-browser)
   try {
     const found = execSync(
-      'which chromium-browser || which chromium || which google-chrome || which google-chrome-stable',
+      'which chromium || which chromium-browser || which google-chrome || which google-chrome-stable',
       { stdio: ['pipe', 'pipe', 'pipe'] }
     ).toString().trim().split('\n')[0]
-    console.log(`[WhatsApp] Auto-detected Chromium at: ${found}`)
-    return found
-  } catch {
-    console.warn('[WhatsApp] Could not auto-detect Chromium — falling back to /usr/bin/chromium-browser')
-    return '/usr/bin/chromium-browser'
-  }
+    if (found) {
+      console.log(`[WhatsApp] Found via which: ${found}`)
+      return found
+    }
+  } catch { /* not in PATH */ }
+
+  // Try find in /nix/store (Nix-based Railway builds)
+  try {
+    const found = execSync(
+      'find /nix/store -name "chromium" -type f 2>/dev/null | head -1',
+      { stdio: ['pipe', 'pipe', 'pipe'] }
+    ).toString().trim()
+    if (found) {
+      console.log(`[WhatsApp] Found via nix/store find: ${found}`)
+      return found
+    }
+  } catch { /* nix not present */ }
+
+  throw new Error('[WhatsApp] Chromium not found — check Railway nixpacks config or set PUPPETEER_EXECUTABLE_PATH')
 }
 
 const executablePath = detectChromium()

@@ -7,7 +7,19 @@ import teamsRouter from './routes/teams'
 import packetsRouter from './routes/packets'
 import authRouter from './routes/auth'
 import adminRouter from './routes/admin'
+import { execSync as _execSync } from 'child_process'
 import { initWhatsApp } from './whatsapp'
+
+// ── Debug: show exactly which Chromium binaries exist on this container ────────
+try {
+  const result = _execSync(
+    'which chromium; which chromium-browser; find /usr -name "chrom*" -type f 2>/dev/null; find /nix/store -name "chromium" -type f 2>/dev/null | head -3',
+    { stdio: ['pipe', 'pipe', 'pipe'] }
+  ).toString().trim()
+  console.log('[Debug] Chromium search:\n' + result)
+} catch (e) {
+  console.log('[Debug] Chromium search — nothing found in standard paths')
+}
 
 const app = express()
 const PORT = Number(process.env.PORT ?? 4000)
