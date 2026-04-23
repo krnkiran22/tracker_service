@@ -1,20 +1,44 @@
+import { execSync } from 'child_process'
 import { Client, LocalAuth } from 'whatsapp-web.js'
 import qrcode from 'qrcode-terminal'
 import type { SdPacket, IngestionRecord } from './db'
 
 let isReady = false
 
+// Detect the real Chromium binary path — try env var first, then common locations
+function detectChromium(): string {
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    console.log(`[WhatsApp] Using PUPPETEER_EXECUTABLE_PATH: ${process.env.PUPPETEER_EXECUTABLE_PATH}`)
+    return process.env.PUPPETEER_EXECUTABLE_PATH
+  }
+  try {
+    const found = execSync(
+      'which chromium-browser || which chromium || which google-chrome || which google-chrome-stable',
+      { stdio: ['pipe', 'pipe', 'pipe'] }
+    ).toString().trim().split('\n')[0]
+    console.log(`[WhatsApp] Auto-detected Chromium at: ${found}`)
+    return found
+  } catch {
+    console.warn('[WhatsApp] Could not auto-detect Chromium — falling back to /usr/bin/chromium-browser')
+    return '/usr/bin/chromium-browser'
+  }
+}
+
+const executablePath = detectChromium()
+
 const client = new Client({
   authStrategy: new LocalAuth({
-    dataPath: process.env.WHATSAPP_SESSION_PATH ?? './.wwebjs_auth',
+    dataPath: process.env.WHATSAPP_SESSION_PATH ?? '/app/.wwebjs_auth',
   }),
   puppeteer: {
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH ?? '/usr/bin/chromium',
+    executablePath,
+    headless: true,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
+      '--disable-software-rasterizer',
     ],
   },
 })

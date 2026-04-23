@@ -1,6 +1,25 @@
 [phases.setup]
-nixPkgs = ["chromium", "nodejs_20"]
-
-[variables]
-PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium"
-PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true"
+aptPkgs = [
+  "chromium",
+  "chromium-driver",
+  "nss",
+  "libnss3",
+  "libatk1.0-0",
+  "libatk-bridge2.0-0",
+  "libcups2",
+  "libdrm2",
+  "libgbm1",
+  "libasound2",
+  "libxkbcommon0",
+  "libxcomposite1",
+  "libxdamage1",
+  "libxfixes3",
+  "libxrandr2",
+  "libxshmfence1",
+  "libx11-xcb1",
+  "libxss1",
+  "libxtst6",
+  "ca-certificates",
+  "fonts-liberation",
+  "xdg-utils"
+]
