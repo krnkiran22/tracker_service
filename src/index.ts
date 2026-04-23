@@ -74,6 +74,17 @@ app.get('/qr', async (_req, res) => {
   }
 })
 
+// ── WhatsApp test (remove after testing) ─────────────────────────────────────
+app.get('/test-wa', async (_req, res) => {
+  const { sendWhatsAppMessage } = await import('./whatsapp')
+  try {
+    await sendWhatsAppMessage('+919677514444', '👋 *Build AI Tracker*\n\nThis is a test message. WhatsApp bot is working correctly! ✅')
+    res.json({ ok: true, message: 'WhatsApp test message sent to +919677514444' })
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err) })
+  }
+})
+
 // ── API Routes ────────────────────────────────────────────────────────────────
 app.use('/api/auth',         authRouter)
 app.use('/api/transactions', transactionsRouter)
