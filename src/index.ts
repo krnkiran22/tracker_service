@@ -9,6 +9,8 @@ import authRouter from './routes/auth'
 import adminRouter from './routes/admin'
 import { execSync as _execSync } from 'child_process'
 import { initWhatsApp } from './whatsapp'
+import * as WhatsAppModule from './whatsapp'
+import QRCode from 'qrcode'
 
 // ── Debug: confirm system Chromium is present (installed via Dockerfile apt) ──
 try {
@@ -45,6 +47,32 @@ app.use(express.json({ limit: '10mb' }))   // allow photo data-URLs
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }))
+
+// ── WhatsApp QR page — open in browser to scan ────────────────────────────────
+app.get('/qr', async (_req, res) => {
+  const qrString = WhatsAppModule.latestQR
+  if (!qrString) {
+    res.send(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
+      <h2>✅ WhatsApp Already Connected</h2>
+      <p>No QR code available — the client is already authenticated.</p>
+      <p>If you just deployed and haven't scanned yet, wait 10–15 seconds and refresh.</p>
+    </body></html>`)
+    return
+  }
+  try {
+    const dataUrl = await QRCode.toDataURL(qrString, { width: 400, margin: 2 })
+    res.send(`<!DOCTYPE html><html><head><title>WhatsApp QR — Build AI Tracker</title></head>
+    <body style="font-family:sans-serif;text-align:center;padding:60px;background:#f5f5f5">
+      <h2>📱 Scan with WhatsApp</h2>
+      <p>Open WhatsApp → Linked Devices → Link a Device → scan this QR</p>
+      <img src="${dataUrl}" style="border:4px solid #25D366;border-radius:12px;margin:20px auto;display:block"/>
+      <p style="color:#888;font-size:13px">This page auto-refreshes every 20s. QR expires in ~60s.</p>
+      <script>setTimeout(()=>location.reload(), 20000)</script>
+    </body></html>`)
+  } catch {
+    res.status(500).send('Failed to generate QR image')
+  }
+})
 
 // ── API Routes ────────────────────────────────────────────────────────────────
 app.use('/api/auth',         authRouter)

@@ -1,8 +1,10 @@
 import { Client, LocalAuth } from 'whatsapp-web.js'
 import qrcode from 'qrcode-terminal'
+import QRCode from 'qrcode'
 import type { SdPacket, IngestionRecord } from './db'
 
 let isReady = false
+export let latestQR: string | null = null   // raw QR string, served via /qr endpoint
 
 // Dockerfile installs system Chromium via apt — PUPPETEER_EXECUTABLE_PATH
 // is set to /usr/bin/chromium in the Dockerfile ENV.
@@ -25,12 +27,14 @@ const client = new Client({
 })
 
 client.on('qr', (qr: string) => {
-  console.log('📱 Scan this QR code with WhatsApp to link the bot:')
+  latestQR = qr
+  console.log('📱 WhatsApp QR ready — open /qr in your browser to scan')
   qrcode.generate(qr, { small: true })
 })
 
 client.on('ready', () => {
   isReady = true
+  latestQR = null
   console.log('✅ WhatsApp client is ready')
 })
 
