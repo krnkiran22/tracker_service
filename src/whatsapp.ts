@@ -5,6 +5,7 @@ import type { SdPacket, IngestionRecord } from './db'
 
 let isReady = false
 export let latestQR: string | null = null   // raw QR string, served via /qr endpoint
+export function getIsReady() { return isReady }
 
 // Dockerfile installs system Chromium via apt — PUPPETEER_EXECUTABLE_PATH
 // is set to /usr/bin/chromium in the Dockerfile ENV.

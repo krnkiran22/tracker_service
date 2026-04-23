@@ -8,7 +8,7 @@ import packetsRouter from './routes/packets'
 import authRouter from './routes/auth'
 import adminRouter from './routes/admin'
 import { execSync as _execSync } from 'child_process'
-import { initWhatsApp } from './whatsapp'
+import { initWhatsApp, getIsReady } from './whatsapp'
 import * as WhatsAppModule from './whatsapp'
 import QRCode from 'qrcode'
 
@@ -74,11 +74,33 @@ app.get('/qr', async (_req, res) => {
   }
 })
 
-// ── WhatsApp test (remove after testing) ─────────────────────────────────────
+// ── WhatsApp status + test ────────────────────────────────────────────────────
+app.get('/wa-status', (_req, res) => {
+  res.json({
+    ready: getIsReady(),
+    qr_pending: !!WhatsAppModule.latestQR,
+    message: getIsReady()
+      ? '✅ WhatsApp client is ready'
+      : WhatsAppModule.latestQR
+        ? '📱 QR pending — open /qr to scan'
+        : '⏳ Initialising — wait 20–30 seconds and refresh',
+  })
+})
+
 app.get('/test-wa', async (_req, res) => {
-  const { sendWhatsAppMessage } = await import('./whatsapp')
+  if (!getIsReady()) {
+    res.status(503).json({
+      ok: false,
+      ready: false,
+      qr_pending: !!WhatsAppModule.latestQR,
+      message: WhatsAppModule.latestQR
+        ? 'QR pending — open /qr to scan first'
+        : 'Client still initialising — wait 20–30s and retry',
+    })
+    return
+  }
   try {
-    await sendWhatsAppMessage('+919677514444', '👋 *Build AI Tracker*\n\nThis is a test message. WhatsApp bot is working correctly! ✅')
+    await WhatsAppModule.sendWhatsAppMessage('+919677514444', '👋 *Build AI Tracker*\n\nThis is a test message. WhatsApp bot is working correctly! ✅')
     res.json({ ok: true, message: 'WhatsApp test message sent to +919677514444' })
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err) })
