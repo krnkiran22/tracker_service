@@ -37,6 +37,7 @@ export interface SdPacket {
   status: PacketStatus
   entered_by: string
   poc_emails: string
+  poc_phones?: string | null   // comma-separated WhatsApp numbers e.g. +919876543210
   created_at: string
 }
 
@@ -60,7 +61,8 @@ export interface TeamWithPoc {
   name: string
   poc_name?: string | null
   poc_email?: string | null
-  poc_emails?: string | null  // comma-separated default emails for this team
+  poc_emails?: string | null   // comma-separated default emails for this team
+  poc_phones?: string | null   // comma-separated WhatsApp numbers for this team
 }
 
 // ── Pool ──────────────────────────────────────────────────────────────────────
@@ -104,6 +106,7 @@ export async function initDB() {
     ALTER TABLE teams ADD COLUMN IF NOT EXISTS poc_name TEXT;
     ALTER TABLE teams ADD COLUMN IF NOT EXISTS poc_email TEXT;
     ALTER TABLE teams ADD COLUMN IF NOT EXISTS poc_emails TEXT NOT NULL DEFAULT '';
+    ALTER TABLE teams ADD COLUMN IF NOT EXISTS poc_phones TEXT NOT NULL DEFAULT '';
 
     CREATE TABLE IF NOT EXISTS transactions (
       id SERIAL PRIMARY KEY,
@@ -141,6 +144,7 @@ export async function initDB() {
     );
     ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS photo_url TEXT;
     ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS photo_urls TEXT;
+    ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS poc_phones TEXT NOT NULL DEFAULT '';
 
     CREATE TABLE IF NOT EXISTS ingestion_records (
       id SERIAL PRIMARY KEY,
@@ -179,13 +183,15 @@ export async function initDB() {
 
 // ── Teams ─────────────────────────────────────────────────────────────────────
 
-export async function upsertTeam(name: string, poc_emails?: string) {
+export async function upsertTeam(name: string, poc_emails?: string, poc_phones?: string) {
   const db = getPool()
-  if (poc_emails !== undefined) {
+  if (poc_emails !== undefined || poc_phones !== undefined) {
     await db.query(
-      `INSERT INTO teams (name, poc_emails) VALUES ($1, $2)
-       ON CONFLICT (name) DO UPDATE SET poc_emails = $2`,
-      [name, poc_emails]
+      `INSERT INTO teams (name, poc_emails, poc_phones) VALUES ($1, $2, $3)
+       ON CONFLICT (name) DO UPDATE SET
+         poc_emails = COALESCE(NULLIF($2, ''), teams.poc_emails),
+         poc_phones = COALESCE(NULLIF($3, ''), teams.poc_phones)`,
+      [name, poc_emails ?? '', poc_phones ?? '']
     )
   } else {
     await db.query(`INSERT INTO teams (name) VALUES ($1) ON CONFLICT (name) DO NOTHING`, [name])
@@ -198,9 +204,9 @@ export async function getTeams(): Promise<string[]> {
   return res.rows.map((r: { name: string }) => r.name)
 }
 
-export async function getTeamsWithEmails(): Promise<{ name: string; poc_emails: string }[]> {
+export async function getTeamsWithEmails(): Promise<{ name: string; poc_emails: string; poc_phones: string }[]> {
   const db = getPool()
-  const res = await db.query(`SELECT name, poc_emails FROM teams ORDER BY name ASC`)
+  const res = await db.query(`SELECT name, poc_emails, poc_phones FROM teams ORDER BY name ASC`)
   return res.rows
 }
 
@@ -215,13 +221,14 @@ export async function updateTeamPoc(name: string, poc_name: string, poc_email: s
   await db.query(`UPDATE teams SET poc_name=$1, poc_email=$2 WHERE name=$3`, [poc_name, poc_email, name])
 }
 
-export async function updateTeam(oldName: string, fields: { name?: string; poc_emails?: string }): Promise<TeamWithPoc | null> {
+export async function updateTeam(oldName: string, fields: { name?: string; poc_emails?: string; poc_phones?: string }): Promise<TeamWithPoc | null> {
   const db = getPool()
   const sets: string[] = []
   const values: unknown[] = []
   let idx = 1
   if (fields.name !== undefined)       { sets.push(`name = $${idx++}`);       values.push(fields.name) }
   if (fields.poc_emails !== undefined) { sets.push(`poc_emails = $${idx++}`); values.push(fields.poc_emails) }
+  if (fields.poc_phones !== undefined) { sets.push(`poc_phones = $${idx++}`); values.push(fields.poc_phones) }
   if (!sets.length) return null
   values.push(oldName)
   const res = await db.query(
@@ -334,12 +341,12 @@ export async function getTransactions(filters?: {
 
 export async function insertPacket(p: Omit<SdPacket, 'id' | 'created_at' | 'status'>): Promise<SdPacket> {
   const db = getPool()
-  // Save poc_emails back to the team so they auto-fill next time
-  await upsertTeam(p.team_name, p.poc_emails || '')
+  // Save poc_emails + poc_phones back to the team so they auto-fill next time
+  await upsertTeam(p.team_name, p.poc_emails || '', (p as any).poc_phones || '')
   const res = await db.query(
     `INSERT INTO sd_packets
-       (team_name, factory, date_received, sd_card_count, notes, photo_url, photo_urls, entered_by, poc_emails)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+       (team_name, factory, date_received, sd_card_count, notes, photo_url, photo_urls, entered_by, poc_emails, poc_phones)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
     [
       p.team_name, p.factory, p.date_received, p.sd_card_count,
       p.notes ?? null,
@@ -347,6 +354,7 @@ export async function insertPacket(p: Omit<SdPacket, 'id' | 'created_at' | 'stat
       p.photo_urls ?? null,
       p.entered_by,
       p.poc_emails,
+      (p as any).poc_phones ?? '',
     ]
   )
   return res.rows[0]

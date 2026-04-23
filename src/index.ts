@@ -7,6 +7,7 @@ import teamsRouter from './routes/teams'
 import packetsRouter from './routes/packets'
 import authRouter from './routes/auth'
 import adminRouter from './routes/admin'
+import { initWhatsApp } from './whatsapp'
 
 const app = express()
 const PORT = Number(process.env.PORT ?? 4000)
@@ -73,6 +74,7 @@ async function start() {
   app.listen(PORT, () => {
     console.log(`✓ Build AI Tracker backend running on port ${PORT}`)
     startKeepAlive()
+    initWhatsApp()
   })
 }
 

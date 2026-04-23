@@ -10,6 +10,11 @@ import {
   sendPacketAcknowledgedEmail,
   sendIngestionCompleteEmail,
 } from '../email'
+import {
+  waSendPacketReceived,
+  waSendPacketAcknowledged,
+  waSendIngestionComplete,
+} from '../whatsapp'
 
 const router = Router()
 
@@ -28,7 +33,7 @@ router.get('/', async (req: Request, res: Response) => {
 // POST /api/packets
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { team_name, factory, date_received, sd_card_count, notes, photo_url, photo_urls, entered_by, poc_emails } = req.body
+    const { team_name, factory, date_received, sd_card_count, notes, photo_url, photo_urls, entered_by, poc_emails, poc_phones } = req.body
 
     if (!team_name || !factory || !date_received || !entered_by) {
       res.status(400).json({ error: 'Missing required fields' })
@@ -46,10 +51,14 @@ router.post('/', async (req: Request, res: Response) => {
       photo_urls:    photo_urls || null,
       entered_by,
       poc_emails:    poc_emails || '',
-    })
+      poc_phones:    poc_phones || '',
+    } as any)
 
     sendPacketReceivedEmail(packet).catch(err =>
       console.error('sendPacketReceivedEmail failed:', err)
+    )
+    waSendPacketReceived(packet as any).catch(err =>
+      console.error('waSendPacketReceived failed:', err)
     )
 
     res.status(201).json(packet)
@@ -90,6 +99,9 @@ router.patch('/:id', async (req: Request, res: Response) => {
       sendPacketAcknowledgedEmail(updated!).catch(err =>
         console.error('sendPacketAcknowledgedEmail failed:', err)
       )
+      waSendPacketAcknowledged(updated! as any).catch(err =>
+        console.error('waSendPacketAcknowledged failed:', err)
+      )
       res.json(updated)
       return
     }
@@ -127,6 +139,9 @@ router.patch('/:id', async (req: Request, res: Response) => {
 
       sendIngestionCompleteEmail(updatedPacket!, record).catch(err =>
         console.error('sendIngestionCompleteEmail failed:', err)
+      )
+      waSendIngestionComplete(updatedPacket! as any, record).catch(err =>
+        console.error('waSendIngestionComplete failed:', err)
       )
 
       res.json({ packet: updatedPacket, ingestion: record })

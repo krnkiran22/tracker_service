@@ -17,9 +17,9 @@ router.get('/', async (_req: Request, res: Response) => {
 // POST /api/teams
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { name, poc_emails } = req.body
+    const { name, poc_emails, poc_phones } = req.body
     if (!name?.trim()) { res.status(400).json({ error: 'name required' }); return }
-    await upsertTeam(String(name).trim(), poc_emails ?? '')
+    await upsertTeam(String(name).trim(), poc_emails ?? '', poc_phones ?? '')
     res.json({ success: true })
   } catch (err) {
     res.status(500).json({ error: String(err) })
@@ -30,8 +30,8 @@ router.post('/', async (req: Request, res: Response) => {
 router.put('/:name', async (req: Request, res: Response) => {
   try {
     const oldName = decodeURIComponent(req.params.name)
-    const { name, poc_emails } = req.body
-    const updated = await updateTeam(oldName, { name, poc_emails })
+    const { name, poc_emails, poc_phones } = req.body
+    const updated = await updateTeam(oldName, { name, poc_emails, poc_phones })
     if (!updated) { res.status(404).json({ error: 'Team not found' }); return }
     res.json(updated)
   } catch (err) {
