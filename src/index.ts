@@ -10,15 +10,15 @@ import adminRouter from './routes/admin'
 import { execSync as _execSync } from 'child_process'
 import { initWhatsApp } from './whatsapp'
 
-// ── Debug: show exactly which Chromium binaries exist on this container ────────
+// ── Debug: confirm puppeteer's bundled Chromium is present ───────────────────
 try {
   const result = _execSync(
-    'apt list --installed 2>/dev/null | grep chrom; ls /usr/bin/chrom* 2>/dev/null; ls /usr/local/bin/chrom* 2>/dev/null',
+    'ls /app/node_modules/puppeteer/.local-chromium 2>/dev/null || ls /app/node_modules/puppeteer/.local-chrome 2>/dev/null || echo "not found"',
     { stdio: ['pipe', 'pipe', 'pipe'] }
   ).toString().trim()
-  console.log('[Debug] Chromium check:\n' + result)
+  console.log('[Debug] Bundled Chromium:', result)
 } catch (e: unknown) {
-  console.log('[Debug] Chromium not found anywhere:', e instanceof Error ? e.message : e)
+  console.log('[Debug] Bundled Chromium check failed:', e instanceof Error ? e.message : e)
 }
 
 const app = express()
