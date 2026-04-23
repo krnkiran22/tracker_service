@@ -87,7 +87,7 @@ app.get('/wa-status', (_req, res) => {
   })
 })
 
-app.get('/test-wa', async (_req, res) => {
+app.get('/test-wa', async (req, res) => {
   if (!getIsReady()) {
     res.status(503).json({
       ok: false,
@@ -99,9 +99,11 @@ app.get('/test-wa', async (_req, res) => {
     })
     return
   }
+  const phone = (req.query.phone as string) || '+919677514444'
+  const text  = (req.query.msg  as string) || '👋 *Build AI Tracker*\n\nWhatsApp bot is live ✅\nHereafter you will receive SD card packet updates here instead of email.'
   try {
-    await WhatsAppModule.sendWhatsAppMessage('+919677514444', '👋 *Build AI Tracker*\n\nThis is a test message. WhatsApp bot is working correctly! ✅')
-    res.json({ ok: true, message: 'WhatsApp test message sent to +919677514444' })
+    await WhatsAppModule.sendWhatsAppMessage(phone, text)
+    res.json({ ok: true, message: `WhatsApp message sent to ${phone}` })
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err) })
   }
