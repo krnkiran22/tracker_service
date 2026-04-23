@@ -1,53 +1,17 @@
-import { execSync } from 'child_process'
 import { Client, LocalAuth } from 'whatsapp-web.js'
 import qrcode from 'qrcode-terminal'
 import type { SdPacket, IngestionRecord } from './db'
 
 let isReady = false
 
-// Detect the real Chromium binary — env var → which → nix/store find → throw
-function detectChromium(): string {
-  const envPath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim()
-  if (envPath) {
-    console.log(`[WhatsApp] Using PUPPETEER_EXECUTABLE_PATH: ${envPath}`)
-    return envPath
-  }
-
-  // Try which first (covers /usr/bin/chromium and /usr/bin/chromium-browser)
-  try {
-    const found = execSync(
-      'which chromium || which chromium-browser || which google-chrome || which google-chrome-stable',
-      { stdio: ['pipe', 'pipe', 'pipe'] }
-    ).toString().trim().split('\n')[0]
-    if (found) {
-      console.log(`[WhatsApp] Found via which: ${found}`)
-      return found
-    }
-  } catch { /* not in PATH */ }
-
-  // Try find in /nix/store (Nix-based Railway builds)
-  try {
-    const found = execSync(
-      'find /nix/store -name "chromium" -type f 2>/dev/null | head -1',
-      { stdio: ['pipe', 'pipe', 'pipe'] }
-    ).toString().trim()
-    if (found) {
-      console.log(`[WhatsApp] Found via nix/store find: ${found}`)
-      return found
-    }
-  } catch { /* nix not present */ }
-
-  throw new Error('[WhatsApp] Chromium not found — check Railway nixpacks config or set PUPPETEER_EXECUTABLE_PATH')
-}
-
-const executablePath = detectChromium()
-
+// puppeteer uses its own bundled Chromium — no executablePath needed.
+// PUPPETEER_SKIP_CHROMIUM_DOWNLOAD must NOT be set (or set to false) so it
+// downloads Chromium during npm ci on Railway.
 const client = new Client({
   authStrategy: new LocalAuth({
     dataPath: process.env.WHATSAPP_SESSION_PATH ?? '/app/.wwebjs_auth',
   }),
   puppeteer: {
-    executablePath,
     headless: true,
     args: [
       '--no-sandbox',
@@ -59,7 +23,7 @@ const client = new Client({
   },
 })
 
-client.on('qr', qr => {
+client.on('qr', (qr: string) => {
   console.log('📱 Scan this QR code with WhatsApp to link the bot:')
   qrcode.generate(qr, { small: true })
 })
@@ -69,11 +33,11 @@ client.on('ready', () => {
   console.log('✅ WhatsApp client is ready')
 })
 
-client.on('auth_failure', msg => {
+client.on('auth_failure', (msg: string) => {
   console.error('❌ WhatsApp auth failure:', msg)
 })
 
-client.on('disconnected', reason => {
+client.on('disconnected', (reason: string) => {
   isReady = false
   console.warn('⚠️  WhatsApp disconnected:', reason, '— reconnecting…')
   client.initialize().catch(console.error)
@@ -163,7 +127,7 @@ _Status: Completed ✓_`
 
 export function initWhatsApp() {
   console.log('🔄 Initialising WhatsApp client…')
-  client.initialize().catch(err => console.error('WhatsApp init error:', err))
+  client.initialize().catch((err: unknown) => console.error('WhatsApp init error:', err))
 }
 
 export default client

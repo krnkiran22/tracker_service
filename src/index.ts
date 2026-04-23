@@ -13,12 +13,12 @@ import { initWhatsApp } from './whatsapp'
 // ── Debug: show exactly which Chromium binaries exist on this container ────────
 try {
   const result = _execSync(
-    'which chromium; which chromium-browser; find /usr -name "chrom*" -type f 2>/dev/null; find /nix/store -name "chromium" -type f 2>/dev/null | head -3',
+    'apt list --installed 2>/dev/null | grep chrom; ls /usr/bin/chrom* 2>/dev/null; ls /usr/local/bin/chrom* 2>/dev/null',
     { stdio: ['pipe', 'pipe', 'pipe'] }
   ).toString().trim()
-  console.log('[Debug] Chromium search:\n' + result)
-} catch (e) {
-  console.log('[Debug] Chromium search — nothing found in standard paths')
+  console.log('[Debug] Chromium check:\n' + result)
+} catch (e: unknown) {
+  console.log('[Debug] Chromium not found anywhere:', e instanceof Error ? e.message : e)
 }
 
 const app = express()
