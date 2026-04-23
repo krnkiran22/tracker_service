@@ -1,9 +1,9 @@
 import { Router, Request, Response } from 'express'
-import { getTeamsWithEmails, upsertTeam } from '../db'
+import { getTeamsWithEmails, upsertTeam, updateTeam, deleteTeam } from '../db'
 
 const router = Router()
 
-// GET /api/teams — returns [{ name, poc_emails }]
+// GET /api/teams
 router.get('/', async (_req: Request, res: Response) => {
   try {
     const teams = await getTeamsWithEmails()
@@ -20,6 +20,31 @@ router.post('/', async (req: Request, res: Response) => {
     const { name, poc_emails } = req.body
     if (!name?.trim()) { res.status(400).json({ error: 'name required' }); return }
     await upsertTeam(String(name).trim(), poc_emails ?? '')
+    res.json({ success: true })
+  } catch (err) {
+    res.status(500).json({ error: String(err) })
+  }
+})
+
+// PUT /api/teams/:name — admin edit
+router.put('/:name', async (req: Request, res: Response) => {
+  try {
+    const oldName = decodeURIComponent(req.params.name)
+    const { name, poc_emails } = req.body
+    const updated = await updateTeam(oldName, { name, poc_emails })
+    if (!updated) { res.status(404).json({ error: 'Team not found' }); return }
+    res.json(updated)
+  } catch (err) {
+    res.status(500).json({ error: String(err) })
+  }
+})
+
+// DELETE /api/teams/:name — admin delete
+router.delete('/:name', async (req: Request, res: Response) => {
+  try {
+    const name = decodeURIComponent(req.params.name)
+    const ok = await deleteTeam(name)
+    if (!ok) { res.status(404).json({ error: 'Team not found' }); return }
     res.json({ success: true })
   } catch (err) {
     res.status(500).json({ error: String(err) })

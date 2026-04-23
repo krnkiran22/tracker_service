@@ -6,6 +6,7 @@ import transactionsRouter from './routes/transactions'
 import teamsRouter from './routes/teams'
 import packetsRouter from './routes/packets'
 import authRouter from './routes/auth'
+import adminRouter from './routes/admin'
 
 const app = express()
 const PORT = Number(process.env.PORT ?? 4000)
@@ -37,6 +38,7 @@ app.use('/api/auth',         authRouter)
 app.use('/api/transactions', transactionsRouter)
 app.use('/api/teams',        teamsRouter)
 app.use('/api/packets',      packetsRouter)
+app.use('/api/admin',        adminRouter)
 
 // ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }))

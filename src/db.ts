@@ -215,6 +215,46 @@ export async function updateTeamPoc(name: string, poc_name: string, poc_email: s
   await db.query(`UPDATE teams SET poc_name=$1, poc_email=$2 WHERE name=$3`, [poc_name, poc_email, name])
 }
 
+export async function updateTeam(oldName: string, fields: { name?: string; poc_emails?: string }): Promise<TeamWithPoc | null> {
+  const db = getPool()
+  const sets: string[] = []
+  const values: unknown[] = []
+  let idx = 1
+  if (fields.name !== undefined)       { sets.push(`name = $${idx++}`);       values.push(fields.name) }
+  if (fields.poc_emails !== undefined) { sets.push(`poc_emails = $${idx++}`); values.push(fields.poc_emails) }
+  if (!sets.length) return null
+  values.push(oldName)
+  const res = await db.query(
+    `UPDATE teams SET ${sets.join(', ')} WHERE name = $${idx} RETURNING *`,
+    values
+  )
+  return res.rows[0] ?? null
+}
+
+export async function deleteTeam(name: string): Promise<boolean> {
+  const db = getPool()
+  const res = await db.query(`DELETE FROM teams WHERE name = $1`, [name])
+  return (res.rowCount ?? 0) > 0
+}
+
+export async function getUsers(): Promise<AppUser[]> {
+  const db = getPool()
+  const res = await db.query(`SELECT * FROM app_users ORDER BY created_at DESC`)
+  return res.rows
+}
+
+export async function deleteUser(id: number): Promise<boolean> {
+  const db = getPool()
+  const res = await db.query(`DELETE FROM app_users WHERE id = $1`, [id])
+  return (res.rowCount ?? 0) > 0
+}
+
+export async function updateUserRole(id: number, role: UserRole): Promise<AppUser | null> {
+  const db = getPool()
+  const res = await db.query(`UPDATE app_users SET role = $1 WHERE id = $2 RETURNING *`, [role, id])
+  return res.rows[0] ?? null
+}
+
 // ── Transactions ──────────────────────────────────────────────────────────────
 
 export async function insertTransaction(tx: Transaction): Promise<Transaction> {
@@ -340,6 +380,33 @@ export async function updatePacketStatus(id: number, status: PacketStatus): Prom
   return res.rows[0] ?? null
 }
 
+export async function updatePacket(id: number, fields: Partial<Omit<SdPacket, 'id' | 'created_at'>>): Promise<SdPacket | null> {
+  const db = getPool()
+  const allowed = ['team_name', 'factory', 'date_received', 'sd_card_count', 'notes', 'status', 'entered_by', 'poc_emails'] as const
+  const sets: string[] = []
+  const values: unknown[] = []
+  let idx = 1
+  for (const key of allowed) {
+    if ((fields as any)[key] !== undefined) {
+      sets.push(`${key} = $${idx++}`)
+      values.push((fields as any)[key])
+    }
+  }
+  if (!sets.length) return null
+  values.push(id)
+  const res = await db.query(
+    `UPDATE sd_packets SET ${sets.join(', ')} WHERE id = $${idx} RETURNING *`,
+    values
+  )
+  return res.rows[0] ?? null
+}
+
+export async function deletePacket(id: number): Promise<boolean> {
+  const db = getPool()
+  const res = await db.query(`DELETE FROM sd_packets WHERE id = $1`, [id])
+  return (res.rowCount ?? 0) > 0
+}
+
 // ── Ingestion Records ─────────────────────────────────────────────────────────
 
 export async function insertIngestionRecord(r: Omit<IngestionRecord, 'id' | 'created_at'>): Promise<IngestionRecord> {
@@ -367,6 +434,33 @@ export async function getIngestionRecordByPacketId(packetId: number): Promise<In
   const db = getPool()
   const res = await db.query(`SELECT * FROM ingestion_records WHERE packet_id = $1`, [packetId])
   return res.rows[0] ?? null
+}
+
+export async function updateIngestionRecord(id: number, fields: Partial<Omit<IngestionRecord, 'id' | 'created_at'>>): Promise<IngestionRecord | null> {
+  const db = getPool()
+  const allowed = ['team_name', 'industry', 'actual_count', 'missing_count', 'extra_count', 'red_cards_count', 'ingested_by', 'deployment_date', 'notes'] as const
+  const sets: string[] = []
+  const values: unknown[] = []
+  let idx = 1
+  for (const key of allowed) {
+    if ((fields as any)[key] !== undefined) {
+      sets.push(`${key} = $${idx++}`)
+      values.push((fields as any)[key])
+    }
+  }
+  if (!sets.length) return null
+  values.push(id)
+  const res = await db.query(
+    `UPDATE ingestion_records SET ${sets.join(', ')} WHERE id = $${idx} RETURNING *`,
+    values
+  )
+  return res.rows[0] ?? null
+}
+
+export async function deleteIngestionRecord(id: number): Promise<boolean> {
+  const db = getPool()
+  const res = await db.query(`DELETE FROM ingestion_records WHERE id = $1`, [id])
+  return (res.rowCount ?? 0) > 0
 }
 
 // ── App Users (OTP auth) ──────────────────────────────────────────────────────

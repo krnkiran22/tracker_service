@@ -1,7 +1,8 @@
 import { Router, Request, Response } from 'express'
 import {
   insertPacket, getPackets, getPacketById,
-  updatePacketStatus, insertIngestionRecord, getIngestionRecordByPacketId,
+  updatePacketStatus, updatePacket, deletePacket,
+  insertIngestionRecord, getIngestionRecordByPacketId,
 } from '../db'
 import type { PacketStatus } from '../db'
 import {
@@ -135,6 +136,32 @@ router.patch('/:id', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'Unknown action' })
   } catch (err) {
     console.error(`PATCH /api/packets/${req.params.id} error:`, err)
+    res.status(500).json({ error: String(err) })
+  }
+})
+
+// PUT /api/packets/:id — admin full edit
+router.put('/:id', async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id)
+    const updated = await updatePacket(id, req.body)
+    if (!updated) { res.status(404).json({ error: 'Not found' }); return }
+    res.json(updated)
+  } catch (err) {
+    console.error(`PUT /api/packets/${req.params.id} error:`, err)
+    res.status(500).json({ error: String(err) })
+  }
+})
+
+// DELETE /api/packets/:id — admin delete
+router.delete('/:id', async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id)
+    const ok = await deletePacket(id)
+    if (!ok) { res.status(404).json({ error: 'Not found' }); return }
+    res.json({ success: true })
+  } catch (err) {
+    console.error(`DELETE /api/packets/${req.params.id} error:`, err)
     res.status(500).json({ error: String(err) })
   }
 })
