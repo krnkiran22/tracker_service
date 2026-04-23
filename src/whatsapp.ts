@@ -4,14 +4,14 @@ import type { SdPacket, IngestionRecord } from './db'
 
 let isReady = false
 
-// puppeteer uses its own bundled Chromium — no executablePath needed.
-// PUPPETEER_SKIP_CHROMIUM_DOWNLOAD must NOT be set (or set to false) so it
-// downloads Chromium during npm ci on Railway.
+// Dockerfile installs system Chromium via apt — PUPPETEER_EXECUTABLE_PATH
+// is set to /usr/bin/chromium in the Dockerfile ENV.
 const client = new Client({
   authStrategy: new LocalAuth({
     dataPath: process.env.WHATSAPP_SESSION_PATH ?? '/app/.wwebjs_auth',
   }),
   puppeteer: {
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH ?? '/usr/bin/chromium',
     headless: true,
     args: [
       '--no-sandbox',
@@ -19,6 +19,7 @@ const client = new Client({
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--disable-software-rasterizer',
+      '--single-process',
     ],
   },
 })
