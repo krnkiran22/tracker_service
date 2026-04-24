@@ -153,13 +153,18 @@ router.post('/:id/events', async (req: Request, res: Response) => {
       const deployDate   = event_data.deployment_date ? String(event_data.deployment_date) : null
       const countedBy    = String(event_data.counted_by ?? 'Logistics')
 
+      const repackPhotos = event_data.repack_photo_urls
+        ? JSON.stringify(event_data.repack_photo_urls)
+        : null
+
       const updatedPacket = await updatePacket(id, {
-        status:          'counted_and_repacked',
-        sd_card_count:   sdCount,
-        num_packages:    numPackages,
-        factory:         factoryName,
-        deployment_date: deployDate ?? undefined,
-        counted_by:      countedBy,
+        status:             'counted_and_repacked',
+        sd_card_count:      sdCount,
+        num_packages:       numPackages,
+        factory:            factoryName,
+        deployment_date:    deployDate ?? undefined,
+        counted_by:         countedBy,
+        repack_photo_urls:  repackPhotos ?? undefined,
       })
 
       // Auto-create a "received" transaction in the inventory tracker

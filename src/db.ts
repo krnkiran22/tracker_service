@@ -41,7 +41,8 @@ export interface SdPacket {
   deployment_date?: string | null  // filled at count & repack
   notes?: string | null
   photo_url?: string | null
-  photo_urls?: string | null   // JSON array of data-URL strings
+  photo_urls?: string | null        // JSON array of arrival data-URL strings
+  repack_photo_urls?: string | null // JSON array of repack data-URL strings
   status: PacketStatus
   entered_by: string
   counted_by?: string | null   // person who counted & repacked
@@ -167,6 +168,7 @@ export async function initDB() {
     ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS deployment_date DATE;
     ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS counted_by TEXT;
     ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS collected_by TEXT;
+    ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS repack_photo_urls TEXT;
 
     CREATE TABLE IF NOT EXISTS ingestion_records (
       id SERIAL PRIMARY KEY,
@@ -450,7 +452,8 @@ export async function updatePacket(id: number, fields: Partial<Omit<SdPacket, 'i
   const db = getPool()
   const allowed = [
     'team_name', 'factory', 'date_received', 'sd_card_count', 'num_packages',
-    'deployment_date', 'notes', 'status', 'entered_by', 'counted_by', 'collected_by', 'poc_emails',
+    'deployment_date', 'notes', 'status', 'entered_by', 'counted_by', 'collected_by',
+    'poc_emails', 'repack_photo_urls',
   ] as const
   const sets: string[] = []
   const values: unknown[] = []
