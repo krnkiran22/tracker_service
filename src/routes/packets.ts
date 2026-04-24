@@ -194,9 +194,11 @@ router.post('/:id/events', async (req: Request, res: Response) => {
     // ── collected_for_ingestion ──────────────────────────────────────────────
     if (event_type === 'collected_for_ingestion') {
       const collectedBy = String(event_data.collected_by ?? 'Ingestion')
+      const assignedTo  = event_data.assigned_to ? String(event_data.assigned_to) : null
       const updatedPacket = await updatePacket(id, {
         status:       'collected_for_ingestion',
         collected_by: collectedBy,
+        ...(assignedTo ? { assigned_to: assignedTo } : {}),
       })
       res.status(201).json({ packet: updatedPacket, event })
       return
