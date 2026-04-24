@@ -3,6 +3,7 @@ import {
   insertPacket, getPackets, getPacketById,
   updatePacketStatus, updatePacket, deletePacket,
   insertIngestionRecord, getIngestionRecordByPacketId,
+  insertSdEvent, getSdEventsByPacketId,
 } from '../db'
 import type { PacketStatus } from '../db'
 import {
@@ -14,6 +15,8 @@ import {
   waSendPacketReceived,
   waSendPacketAcknowledged,
   waSendIngestionComplete,
+  waSendReceivedAtHQ,
+  waSendCountedAndRepacked,
 } from '../whatsapp'
 
 const router = Router()
@@ -31,16 +34,59 @@ router.get('/', async (req: Request, res: Response) => {
 })
 
 // POST /api/packets
+// Supports two flows:
+//   New event-based flow:  { team_name, received_date, poc_phones, entered_by }
+//   Legacy admin flow:     { team_name, factory, date_received, sd_card_count, ... }
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { team_name, factory, date_received, sd_card_count, notes, photo_url, photo_urls, entered_by, poc_emails, poc_phones } = req.body
+    const body = req.body
+
+    // ── New event-based logistics flow (received_at_hq) ──────────────────────
+    if (!body.factory && body.received_date) {
+      const { team_name, received_date, poc_phones, entered_by } = body
+      if (!team_name || !received_date) {
+        res.status(400).json({ error: 'team_name and received_date are required' })
+        return
+      }
+
+      const packet = await insertPacket({
+        team_name,
+        factory:        '',
+        date_received:  received_date,
+        sd_card_count:  0,
+        notes:          null,
+        photo_url:      null,
+        photo_urls:     null,
+        entered_by:     entered_by || 'Logistics',
+        poc_emails:     '',
+        poc_phones:     poc_phones || '',
+        status:         'received_at_hq',
+      } as any)
+
+      // Log the event
+      await insertSdEvent(packet.id, 'received_at_hq', {
+        team_name,
+        received_date,
+        poc_phones: poc_phones || '',
+        entered_by: entered_by || 'Logistics',
+      })
+
+      waSendReceivedAtHQ(packet as any).catch(err =>
+        console.error('waSendReceivedAtHQ failed:', err)
+      )
+
+      res.status(201).json(packet)
+      return
+    }
+
+    // ── Legacy flow (admin / full form) ──────────────────────────────────────
+    const { team_name, factory, date_received, sd_card_count, notes, photo_url, photo_urls, entered_by, poc_emails, poc_phones } = body
 
     if (!team_name || !factory || !date_received || !entered_by) {
       res.status(400).json({ error: 'Missing required fields' })
       return
     }
 
-    // photo_urls is a JSON-stringified string[] from the frontend
     const packet = await insertPacket({
       team_name,
       factory,
@@ -68,14 +114,58 @@ router.post('/', async (req: Request, res: Response) => {
   }
 })
 
+// POST /api/packets/:id/events — log a new event against an existing packet
+router.post('/:id/events', async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id)
+    const { event_type, event_data } = req.body as {
+      event_type: 'counted_and_repacked'
+      event_data: Record<string, unknown>
+    }
+
+    if (!event_type || !event_data) {
+      res.status(400).json({ error: 'event_type and event_data are required' })
+      return
+    }
+
+    const packet = await getPacketById(id)
+    if (!packet) { res.status(404).json({ error: 'Packet not found' }); return }
+
+    // Log the event
+    const event = await insertSdEvent(id, event_type, event_data)
+
+    // Update packet status + sd_card_count if provided
+    const updatedPacket = await updatePacket(id, {
+      status: event_type as PacketStatus,
+      ...(event_data.sd_card_count !== undefined
+        ? { sd_card_count: Number(event_data.sd_card_count) }
+        : {}),
+    })
+
+    if (event_type === 'counted_and_repacked') {
+      waSendCountedAndRepacked(updatedPacket as any, event_data).catch(err =>
+        console.error('waSendCountedAndRepacked failed:', err)
+      )
+    }
+
+    res.status(201).json({ packet: updatedPacket, event })
+  } catch (err) {
+    console.error(`POST /api/packets/${req.params.id}/events error:`, err)
+    res.status(500).json({ error: String(err) })
+  }
+})
+
 // GET /api/packets/:id
 router.get('/:id', async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id)
     const packet = await getPacketById(id)
     if (!packet) { res.status(404).json({ error: 'Not found' }); return }
-    const ingestion = await getIngestionRecordByPacketId(id)
-    res.json({ packet, ingestion })
+    const [ingestion, events] = await Promise.all([
+      getIngestionRecordByPacketId(id),
+      getSdEventsByPacketId(id),
+    ])
+    res.json({ packet, ingestion, events })
   } catch (err) {
     res.status(500).json({ error: String(err) })
   }

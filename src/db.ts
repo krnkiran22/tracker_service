@@ -5,7 +5,12 @@ import type { Transaction } from './items'
 export type { Transaction }
 export { ITEMS } from './items'
 
-export type PacketStatus = 'received' | 'processing' | 'completed'
+export type PacketStatus =
+  | 'received'
+  | 'processing'
+  | 'completed'
+  | 'received_at_hq'
+  | 'counted_and_repacked'
 export type UserRole = 'admin' | 'logistics' | 'ingestion' | 'user'
 
 export interface AppUser {
@@ -53,6 +58,14 @@ export interface IngestionRecord {
   ingested_by: string
   deployment_date: string
   notes?: string | null
+  created_at: string
+}
+
+export interface SdEvent {
+  id: number
+  packet_id: number
+  event_type: 'received_at_hq' | 'counted_and_repacked'
+  event_data: Record<string, unknown>
   created_at: string
 }
 
@@ -178,6 +191,25 @@ export async function initDB() {
       used BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS sd_events (
+      id SERIAL PRIMARY KEY,
+      packet_id INT NOT NULL REFERENCES sd_packets(id) ON DELETE CASCADE,
+      event_type TEXT NOT NULL,
+      event_data JSONB NOT NULL DEFAULT '{}',
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `)
+
+  // Expand sd_packets status CHECK to include new event-based statuses
+  await db.query(`
+    DO $$
+    BEGIN
+      ALTER TABLE sd_packets DROP CONSTRAINT IF EXISTS sd_packets_status_check;
+      ALTER TABLE sd_packets ADD CONSTRAINT sd_packets_status_check
+        CHECK (status IN ('received','processing','completed','received_at_hq','counted_and_repacked'));
+    EXCEPTION WHEN others THEN NULL;
+    END $$;
   `)
 }
 
@@ -471,7 +503,7 @@ export async function deleteIngestionRecord(id: number): Promise<boolean> {
   return (res.rowCount ?? 0) > 0
 }
 
-// ── App Users (OTP auth) ──────────────────────────────────────────────────────
+// ── App Users ─────────────────────────────────────────────────────────────────
 
 export async function createUser(name: string, email: string, role: UserRole): Promise<AppUser> {
   const db = getPool()
@@ -513,6 +545,33 @@ export async function createOtp(email: string): Promise<string> {
   )
   return code
 }
+
+// ── SD Events ─────────────────────────────────────────────────────────────────
+
+export async function insertSdEvent(
+  packet_id: number,
+  event_type: SdEvent['event_type'],
+  event_data: Record<string, unknown>
+): Promise<SdEvent> {
+  const db = getPool()
+  const res = await db.query(
+    `INSERT INTO sd_events (packet_id, event_type, event_data)
+     VALUES ($1, $2, $3) RETURNING *`,
+    [packet_id, event_type, JSON.stringify(event_data)]
+  )
+  return res.rows[0]
+}
+
+export async function getSdEventsByPacketId(packet_id: number): Promise<SdEvent[]> {
+  const db = getPool()
+  const res = await db.query(
+    `SELECT * FROM sd_events WHERE packet_id = $1 ORDER BY created_at ASC`,
+    [packet_id]
+  )
+  return res.rows
+}
+
+// ── OTP ───────────────────────────────────────────────────────────────────────
 
 export async function verifyOtp(email: string, code: string): Promise<boolean> {
   const db = getPool()

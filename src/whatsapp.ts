@@ -74,6 +74,46 @@ function fmt(d: string) {
   return d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'
 }
 
+// ── Event: received_at_hq ─────────────────────────────────────────────────────
+export async function waSendReceivedAtHQ(packet: SdPacket & { poc_phones?: string | null }) {
+  if (!packet.poc_phones) return
+  const ts = new Date(packet.created_at).toLocaleString('en-IN', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true,
+  })
+  const msg =
+`📦 *SD Cards Received at HQ*
+
+*Team:* ${packet.team_name}
+*Date Received:* ${fmt(packet.date_received)}
+*Logged At:* ${ts}
+
+Your SD cards have arrived at HQ and will be counted shortly.`
+  await broadcast(packet.poc_phones, msg)
+}
+
+// ── Event: counted_and_repacked ───────────────────────────────────────────────
+export async function waSendCountedAndRepacked(
+  packet: SdPacket & { poc_phones?: string | null },
+  eventData: Record<string, unknown>,
+) {
+  if (!packet.poc_phones) return
+  const ts = new Date().toLocaleString('en-IN', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true,
+  })
+  const notes = eventData.condition_notes ? `\n*Condition Notes:* ${eventData.condition_notes}` : ''
+  const msg =
+`🔢 *SD Cards Counted & Repacked*
+
+*Team:* ${packet.team_name}
+*SD Card Count:* ${eventData.sd_card_count}${notes}
+*Repacked At:* ${ts}
+
+Cards are packed and ready for ingestion team pickup.`
+  await broadcast(packet.poc_phones, msg)
+}
+
 // ── Stage 1 — SD Cards Received ───────────────────────────────────────────────
 export async function waSendPacketReceived(packet: SdPacket & { poc_phones?: string | null }) {
   if (!packet.poc_phones) return
