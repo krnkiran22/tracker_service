@@ -253,17 +253,23 @@ router.patch('/:id', async (req: Request, res: Response) => {
     }
 
     if (action === 'complete') {
-      if (packet.status !== 'processing') {
-        res.status(400).json({ error: 'Packet is not in processing state' })
+      // Allow completion from both the old `processing` state and the new
+      // logistics-pipeline `collected_for_ingestion` state
+      const completableStatuses = ['processing', 'collected_for_ingestion']
+      if (!completableStatuses.includes(packet.status)) {
+        res.status(400).json({ error: 'Packet cannot be completed from its current state' })
         return
       }
 
       const {
-        team_name, industry, actual_count, missing_count, extra_count,
+        team_name, actual_count, missing_count, extra_count,
         red_cards_count, ingested_by, deployment_date, notes,
       } = ingestionData
 
-      if (!team_name || !industry || !ingested_by || !deployment_date) {
+      // industry is optional for the new logistics flow
+      const industry = ingestionData.industry || packet.factory || 'General'
+
+      if (!team_name || !ingested_by || !deployment_date) {
         res.status(400).json({ error: 'Missing ingestion fields' })
         return
       }
