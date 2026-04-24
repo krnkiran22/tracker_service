@@ -44,7 +44,7 @@ router.post('/', async (req: Request, res: Response) => {
 
     // ── New event-based logistics flow (received_at_hq) ──────────────────────
     if (!body.factory && body.received_date) {
-      const { team_name, received_date, poc_phones, entered_by } = body
+      const { team_name, received_date, poc_phones, entered_by, photo_urls } = body
       if (!team_name || !received_date) {
         res.status(400).json({ error: 'team_name and received_date are required' })
         return
@@ -57,7 +57,7 @@ router.post('/', async (req: Request, res: Response) => {
         sd_card_count:  0,
         notes:          null,
         photo_url:      null,
-        photo_urls:     null,
+        photo_urls:     photo_urls || null,
         entered_by:     entered_by || 'Logistics',
         poc_emails:     '',
         poc_phones:     poc_phones || '',
@@ -68,8 +68,9 @@ router.post('/', async (req: Request, res: Response) => {
       await insertSdEvent(packet.id, 'received_at_hq', {
         team_name,
         received_date,
-        poc_phones: poc_phones || '',
-        entered_by: entered_by || 'Logistics',
+        poc_phones:  poc_phones || '',
+        entered_by:  entered_by || 'Logistics',
+        photo_urls:  photo_urls || null,
       })
 
       waSendReceivedAtHQ(packet as any).catch(err =>

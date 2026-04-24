@@ -371,14 +371,14 @@ export async function getTransactions(filters?: {
 
 // ── SD Packets ────────────────────────────────────────────────────────────────
 
-export async function insertPacket(p: Omit<SdPacket, 'id' | 'created_at' | 'status'>): Promise<SdPacket> {
+export async function insertPacket(p: Omit<SdPacket, 'id' | 'created_at'> & { status?: PacketStatus }): Promise<SdPacket> {
   const db = getPool()
   // Save poc_emails + poc_phones back to the team so they auto-fill next time
   await upsertTeam(p.team_name, p.poc_emails || '', (p as any).poc_phones || '')
   const res = await db.query(
     `INSERT INTO sd_packets
-       (team_name, factory, date_received, sd_card_count, notes, photo_url, photo_urls, entered_by, poc_emails, poc_phones)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+       (team_name, factory, date_received, sd_card_count, notes, photo_url, photo_urls, entered_by, poc_emails, poc_phones, status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
     [
       p.team_name, p.factory, p.date_received, p.sd_card_count,
       p.notes ?? null,
@@ -387,6 +387,7 @@ export async function insertPacket(p: Omit<SdPacket, 'id' | 'created_at' | 'stat
       p.entered_by,
       p.poc_emails,
       (p as any).poc_phones ?? '',
+      p.status ?? 'received',
     ]
   )
   return res.rows[0]
