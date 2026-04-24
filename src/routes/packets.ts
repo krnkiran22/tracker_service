@@ -4,6 +4,7 @@ import {
   updatePacketStatus, updatePacket, deletePacket,
   insertIngestionRecord, getIngestionRecordByPacketId,
   insertSdEvent, getSdEventsByPacketId,
+  insertTransaction,
 } from '../db'
 import type { PacketStatus } from '../db'
 import {
@@ -143,6 +144,24 @@ router.post('/:id/events', async (req: Request, res: Response) => {
     })
 
     if (event_type === 'counted_and_repacked') {
+      // Auto-create a "received" transaction so the inventory tracker reflects
+      // that this team has sent back X SD cards.
+      const sdCount = Number(event_data.sd_card_count) || 0
+      insertTransaction({
+        team_name:       packet.team_name,
+        type:            'received',
+        date:            new Date().toISOString().slice(0, 10),
+        devices:         0,
+        sd_cards:        sdCount,
+        hubs:            0,
+        cables:          0,
+        extension_boxes: 0,
+        sd_card_readers: 0,
+        other:           0,
+        notes:           `Auto-logged from SD card count & repack (packet #${id})${event_data.condition_notes ? ' — ' + event_data.condition_notes : ''}`,
+        entered_by:      String(event_data.counted_by ?? 'Logistics'),
+      }).catch(err => console.error('auto-transaction insert failed:', err))
+
       waSendCountedAndRepacked(updatedPacket as any, event_data).catch(err =>
         console.error('waSendCountedAndRepacked failed:', err)
       )
