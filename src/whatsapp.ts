@@ -49,6 +49,18 @@ client.on('disconnected', (reason: string) => {
   client.initialize().catch(console.error)
 })
 
+// ── Phone normalisation ───────────────────────────────────────────────────────
+// Accepts any of: "9876543210", "+919876543210", "919876543210", "09876543210"
+// Always produces the numeric-only string used by whatsapp-web.js (e.g. "919876543210")
+function normalizePhone(raw: string): string {
+  const digits = raw.replace(/\D/g, '')
+  if (digits.length === 10)                              return '91' + digits          // bare 10-digit
+  if (digits.length === 11 && digits.startsWith('0'))   return '91' + digits.slice(1) // 0XXXXXXXXXX
+  if (digits.length === 12 && digits.startsWith('91'))  return digits                 // already 91XXXXXXXXXX
+  if (digits.length === 13 && digits.startsWith('091')) return digits.slice(1)        // 091XXXXXXXXXX
+  return digits  // fallback — use as-is
+}
+
 // ── Core send ─────────────────────────────────────────────────────────────────
 export async function sendWhatsAppMessage(phone: string, message: string): Promise<void> {
   if (!isReady) {
@@ -56,7 +68,7 @@ export async function sendWhatsAppMessage(phone: string, message: string): Promi
     return
   }
   try {
-    const chatId = phone.replace('+', '').replace(/\s/g, '') + '@c.us'
+    const chatId = normalizePhone(phone) + '@c.us'
     await client.sendMessage(chatId, message)
     console.log(`[WhatsApp] ✅ sent to ${phone}`)
   } catch (err) {
