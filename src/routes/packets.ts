@@ -4,7 +4,7 @@ import {
   updatePacketStatus, updatePacket, deletePacket,
   insertIngestionRecord, getIngestionRecordByPacketId,
   insertSdEvent, getSdEventsByPacketId,
-  insertTransaction,
+  insertTransaction, getCompletedPacketsWithRecords,
 } from '../db'
 import type { PacketStatus } from '../db'
 import {
@@ -21,6 +21,19 @@ import {
 } from '../whatsapp'
 
 const router = Router()
+
+// GET /api/packets/completed-with-records
+// Single JOIN query — returns completed packets with their ingestion records embedded.
+// Must be declared before /:id so Express doesn't treat "completed-with-records" as an id.
+router.get('/completed-with-records', async (_req: Request, res: Response) => {
+  try {
+    const rows = await getCompletedPacketsWithRecords()
+    res.json(rows)
+  } catch (err) {
+    console.error('GET /api/packets/completed-with-records error:', err)
+    res.status(500).json({ error: String(err) })
+  }
+})
 
 // GET /api/packets
 // Supports ?status=single  OR  ?statuses=a,b,c  for multi-status filtering

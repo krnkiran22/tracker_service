@@ -453,6 +453,52 @@ export async function getPacketsByStatuses(statuses: PacketStatus[]): Promise<Sd
   return res.rows
 }
 
+// Single JOIN — all completed packets with their ingestion records in one query
+export async function getCompletedPacketsWithRecords(): Promise<
+  Array<SdPacket & { ingestion: IngestionRecord | null }>
+> {
+  const db = getPool()
+  const res = await db.query(`
+    SELECT
+      p.*,
+      ir.id            AS ir_id,
+      ir.industry      AS ir_industry,
+      ir.actual_count  AS ir_actual_count,
+      ir.missing_count AS ir_missing_count,
+      ir.extra_count   AS ir_extra_count,
+      ir.red_cards_count AS ir_red_cards_count,
+      ir.ingested_by   AS ir_ingested_by,
+      ir.deployment_date AS ir_deployment_date,
+      ir.notes         AS ir_notes,
+      ir.created_at    AS ir_created_at
+    FROM sd_packets p
+    LEFT JOIN ingestion_records ir ON ir.packet_id = p.id
+    WHERE p.status = 'completed'
+    ORDER BY p.date_received DESC, p.created_at DESC
+  `)
+  return res.rows.map(row => {
+    const ingestion: IngestionRecord | null = row.ir_id ? {
+      id:              row.ir_id,
+      packet_id:       row.id,
+      team_name:       row.team_name,
+      industry:        row.ir_industry,
+      actual_count:    row.ir_actual_count,
+      missing_count:   row.ir_missing_count,
+      extra_count:     row.ir_extra_count,
+      red_cards_count: row.ir_red_cards_count,
+      ingested_by:     row.ir_ingested_by,
+      deployment_date: row.ir_deployment_date,
+      notes:           row.ir_notes,
+      created_at:      row.ir_created_at,
+    } : null
+    // Strip the ir_* columns from the packet object
+    const { ir_id, ir_industry, ir_actual_count, ir_missing_count, ir_extra_count,
+            ir_red_cards_count, ir_ingested_by, ir_deployment_date, ir_notes, ir_created_at,
+            ...packet } = row
+    return { ...packet, ingestion } as SdPacket & { ingestion: IngestionRecord | null }
+  })
+}
+
 export async function getPacketById(id: number): Promise<SdPacket | null> {
   const db = getPool()
   const res = await db.query(`SELECT * FROM sd_packets WHERE id = $1`, [id])
