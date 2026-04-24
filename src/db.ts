@@ -12,7 +12,7 @@ export type PacketStatus =
   | 'received_at_hq'
   | 'counted_and_repacked'
   | 'collected_for_ingestion'
-export type UserRole = 'admin' | 'logistics' | 'ingestion' | 'user'
+export type UserRole = 'admin' | 'logistics' | 'ingestion' | 'ingestion_lead' | 'user'
 
 export interface AppUser {
   id: number
@@ -189,7 +189,7 @@ export async function initDB() {
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
       email TEXT UNIQUE NOT NULL,
-      role TEXT NOT NULL CHECK (role IN ('admin', 'logistics', 'ingestion', 'user')),
+      role TEXT NOT NULL CHECK (role IN ('admin', 'logistics', 'ingestion', 'ingestion_lead', 'user')),
       is_verified BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
@@ -221,6 +221,24 @@ export async function initDB() {
         CHECK (status IN ('received','processing','completed','received_at_hq','counted_and_repacked','collected_for_ingestion'));
     EXCEPTION WHEN others THEN NULL;
     END $$;
+  `)
+
+  // Widen app_users role CHECK to include ingestion_lead
+  await db.query(`
+    DO $$
+    BEGIN
+      ALTER TABLE app_users DROP CONSTRAINT IF EXISTS app_users_role_check;
+      ALTER TABLE app_users ADD CONSTRAINT app_users_role_check
+        CHECK (role IN ('admin', 'logistics', 'ingestion', 'ingestion_lead', 'user'));
+    EXCEPTION WHEN others THEN NULL;
+    END $$;
+  `)
+
+  // Seed kiran@build.ai as ingestion_lead (no-op if already exists)
+  await db.query(`
+    INSERT INTO app_users (name, email, role, is_verified)
+    VALUES ('Kiran', 'kiran@build.ai', 'ingestion_lead', true)
+    ON CONFLICT (email) DO UPDATE SET role = 'ingestion_lead', is_verified = true
   `)
 }
 
