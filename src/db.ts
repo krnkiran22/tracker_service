@@ -11,6 +11,7 @@ export type PacketStatus =
   | 'completed'
   | 'received_at_hq'
   | 'counted_and_repacked'
+  | 'collected_for_ingestion'
 export type UserRole = 'admin' | 'logistics' | 'ingestion' | 'user'
 
 export interface AppUser {
@@ -36,11 +37,15 @@ export interface SdPacket {
   factory: string
   date_received: string
   sd_card_count: number
+  num_packages: number          // filled at count & repack
+  deployment_date?: string | null  // filled at count & repack
   notes?: string | null
   photo_url?: string | null
   photo_urls?: string | null   // JSON array of data-URL strings
   status: PacketStatus
   entered_by: string
+  counted_by?: string | null   // person who counted & repacked
+  collected_by?: string | null // person who collected for ingestion
   poc_emails: string
   poc_phones?: string | null   // comma-separated WhatsApp numbers e.g. +919876543210
   created_at: string
@@ -64,7 +69,7 @@ export interface IngestionRecord {
 export interface SdEvent {
   id: number
   packet_id: number
-  event_type: 'received_at_hq' | 'counted_and_repacked'
+  event_type: 'received_at_hq' | 'counted_and_repacked' | 'collected_for_ingestion'
   event_data: Record<string, unknown>
   created_at: string
 }
@@ -158,6 +163,10 @@ export async function initDB() {
     ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS photo_url TEXT;
     ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS photo_urls TEXT;
     ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS poc_phones TEXT NOT NULL DEFAULT '';
+    ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS num_packages INT NOT NULL DEFAULT 0;
+    ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS deployment_date DATE;
+    ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS counted_by TEXT;
+    ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS collected_by TEXT;
 
     CREATE TABLE IF NOT EXISTS ingestion_records (
       id SERIAL PRIMARY KEY,
@@ -201,13 +210,13 @@ export async function initDB() {
     );
   `)
 
-  // Expand sd_packets status CHECK to include new event-based statuses
+  // Expand sd_packets status CHECK to include all event-based statuses
   await db.query(`
     DO $$
     BEGIN
       ALTER TABLE sd_packets DROP CONSTRAINT IF EXISTS sd_packets_status_check;
       ALTER TABLE sd_packets ADD CONSTRAINT sd_packets_status_check
-        CHECK (status IN ('received','processing','completed','received_at_hq','counted_and_repacked'));
+        CHECK (status IN ('received','processing','completed','received_at_hq','counted_and_repacked','collected_for_ingestion'));
     EXCEPTION WHEN others THEN NULL;
     END $$;
   `)
@@ -377,14 +386,19 @@ export async function insertPacket(p: Omit<SdPacket, 'id' | 'created_at'> & { st
   await upsertTeam(p.team_name, p.poc_emails || '', (p as any).poc_phones || '')
   const res = await db.query(
     `INSERT INTO sd_packets
-       (team_name, factory, date_received, sd_card_count, notes, photo_url, photo_urls, entered_by, poc_emails, poc_phones, status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+       (team_name, factory, date_received, sd_card_count, num_packages, deployment_date,
+        notes, photo_url, photo_urls, entered_by, counted_by, collected_by, poc_emails, poc_phones, status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
     [
       p.team_name, p.factory, p.date_received, p.sd_card_count,
+      p.num_packages ?? 0,
+      p.deployment_date ?? null,
       p.notes ?? null,
       p.photo_url ?? null,
       p.photo_urls ?? null,
       p.entered_by,
+      p.counted_by ?? null,
+      p.collected_by ?? null,
       p.poc_emails,
       (p as any).poc_phones ?? '',
       p.status ?? 'received',
@@ -406,6 +420,17 @@ export async function getPackets(filters?: { status?: PacketStatus }): Promise<S
   return res.rows
 }
 
+export async function getPacketsByStatuses(statuses: PacketStatus[]): Promise<SdPacket[]> {
+  if (!statuses.length) return []
+  const db = getPool()
+  const placeholders = statuses.map((_, i) => `$${i + 1}`).join(', ')
+  const res = await db.query(
+    `SELECT * FROM sd_packets WHERE status IN (${placeholders}) ORDER BY date_received DESC, created_at DESC`,
+    statuses
+  )
+  return res.rows
+}
+
 export async function getPacketById(id: number): Promise<SdPacket | null> {
   const db = getPool()
   const res = await db.query(`SELECT * FROM sd_packets WHERE id = $1`, [id])
@@ -423,7 +448,10 @@ export async function updatePacketStatus(id: number, status: PacketStatus): Prom
 
 export async function updatePacket(id: number, fields: Partial<Omit<SdPacket, 'id' | 'created_at'>>): Promise<SdPacket | null> {
   const db = getPool()
-  const allowed = ['team_name', 'factory', 'date_received', 'sd_card_count', 'notes', 'status', 'entered_by', 'poc_emails'] as const
+  const allowed = [
+    'team_name', 'factory', 'date_received', 'sd_card_count', 'num_packages',
+    'deployment_date', 'notes', 'status', 'entered_by', 'counted_by', 'collected_by', 'poc_emails',
+  ] as const
   const sets: string[] = []
   const values: unknown[] = []
   let idx = 1

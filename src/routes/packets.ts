@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express'
 import {
-  insertPacket, getPackets, getPacketById,
+  insertPacket, getPackets, getPacketsByStatuses, getPacketById,
   updatePacketStatus, updatePacket, deletePacket,
   insertIngestionRecord, getIngestionRecordByPacketId,
   insertSdEvent, getSdEventsByPacketId,
@@ -23,10 +23,19 @@ import {
 const router = Router()
 
 // GET /api/packets
+// Supports ?status=single  OR  ?statuses=a,b,c  for multi-status filtering
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const status = req.query.status as PacketStatus | undefined
-    const packets = await getPackets(status ? { status } : undefined)
+    const status   = req.query.status   as PacketStatus | undefined
+    const statuses = req.query.statuses as string | undefined
+
+    let packets
+    if (statuses) {
+      const list = statuses.split(',').map(s => s.trim()).filter(Boolean) as PacketStatus[]
+      packets = await getPacketsByStatuses(list)
+    } else {
+      packets = await getPackets(status ? { status } : undefined)
+    }
     res.json(packets)
   } catch (err) {
     console.error('GET /api/packets error:', err)
@@ -121,7 +130,7 @@ router.post('/:id/events', async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id)
     const { event_type, event_data } = req.body as {
-      event_type: 'counted_and_repacked'
+      event_type: 'counted_and_repacked' | 'collected_for_ingestion'
       event_data: Record<string, unknown>
     }
 
@@ -136,18 +145,24 @@ router.post('/:id/events', async (req: Request, res: Response) => {
     // Log the event
     const event = await insertSdEvent(id, event_type, event_data)
 
-    // Update packet status + sd_card_count if provided
-    const updatedPacket = await updatePacket(id, {
-      status: event_type as PacketStatus,
-      ...(event_data.sd_card_count !== undefined
-        ? { sd_card_count: Number(event_data.sd_card_count) }
-        : {}),
-    })
-
+    // ── counted_and_repacked ─────────────────────────────────────────────────
     if (event_type === 'counted_and_repacked') {
-      // Auto-create a "received" transaction so the inventory tracker reflects
-      // that this team has sent back X SD cards.
-      const sdCount = Number(event_data.sd_card_count) || 0
+      const sdCount      = Number(event_data.sd_card_count)  || 0
+      const numPackages  = Number(event_data.num_packages)    || 0
+      const factoryName  = String(event_data.factory_name   ?? packet.factory ?? '')
+      const deployDate   = event_data.deployment_date ? String(event_data.deployment_date) : null
+      const countedBy    = String(event_data.counted_by ?? 'Logistics')
+
+      const updatedPacket = await updatePacket(id, {
+        status:          'counted_and_repacked',
+        sd_card_count:   sdCount,
+        num_packages:    numPackages,
+        factory:         factoryName,
+        deployment_date: deployDate ?? undefined,
+        counted_by:      countedBy,
+      })
+
+      // Auto-create a "received" transaction in the inventory tracker
       insertTransaction({
         team_name:       packet.team_name,
         type:            'received',
@@ -160,15 +175,29 @@ router.post('/:id/events', async (req: Request, res: Response) => {
         sd_card_readers: 0,
         other:           0,
         notes:           `Auto-logged from SD card count & repack (packet #${id})${event_data.condition_notes ? ' — ' + event_data.condition_notes : ''}`,
-        entered_by:      String(event_data.counted_by ?? 'Logistics'),
+        entered_by:      countedBy,
       }).catch(err => console.error('auto-transaction insert failed:', err))
 
       waSendCountedAndRepacked(updatedPacket as any, event_data).catch(err =>
         console.error('waSendCountedAndRepacked failed:', err)
       )
+
+      res.status(201).json({ packet: updatedPacket, event })
+      return
     }
 
-    res.status(201).json({ packet: updatedPacket, event })
+    // ── collected_for_ingestion ──────────────────────────────────────────────
+    if (event_type === 'collected_for_ingestion') {
+      const collectedBy = String(event_data.collected_by ?? 'Ingestion')
+      const updatedPacket = await updatePacket(id, {
+        status:       'collected_for_ingestion',
+        collected_by: collectedBy,
+      })
+      res.status(201).json({ packet: updatedPacket, event })
+      return
+    }
+
+    res.status(400).json({ error: `Unknown event_type: ${event_type}` })
   } catch (err) {
     console.error(`POST /api/packets/${req.params.id}/events error:`, err)
     res.status(500).json({ error: String(err) })
