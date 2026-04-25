@@ -45,10 +45,14 @@ router.delete('/ingestion-records/:id', async (req: Request, res: Response) => {
 
 // ── Users ─────────────────────────────────────────────────────────────────────
 
-// GET /api/admin/users
-router.get('/users', async (_req: Request, res: Response) => {
+// GET /api/admin/users?roles=ingestion,ingestion_lead
+router.get('/users', async (req: Request, res: Response) => {
   try {
-    const users = await getUsers()
+    const rolesParam = req.query.roles as string | undefined
+    const roles = rolesParam
+      ? (rolesParam.split(',').map(r => r.trim()).filter(Boolean) as UserRole[])
+      : undefined
+    const users = await getUsers(roles)
     res.json(users)
   } catch (err) {
     res.status(500).json({ error: String(err) })

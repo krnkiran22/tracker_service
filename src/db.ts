@@ -313,8 +313,16 @@ export async function deleteTeam(name: string): Promise<boolean> {
   return (res.rowCount ?? 0) > 0
 }
 
-export async function getUsers(): Promise<AppUser[]> {
+export async function getUsers(roles?: UserRole[]): Promise<AppUser[]> {
   const db = getPool()
+  if (roles && roles.length > 0) {
+    const placeholders = roles.map((_, i) => `$${i + 1}`).join(', ')
+    const res = await db.query(
+      `SELECT * FROM app_users WHERE role IN (${placeholders}) ORDER BY name ASC`,
+      roles
+    )
+    return res.rows
+  }
   const res = await db.query(`SELECT * FROM app_users ORDER BY created_at DESC`)
   return res.rows
 }
