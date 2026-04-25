@@ -43,6 +43,7 @@ export interface SdPacket {
   photo_url?: string | null
   photo_urls?: string | null        // JSON array of arrival data-URL strings
   repack_photo_urls?: string | null // JSON array of repack data-URL strings
+  factory_entries?: string | null   // JSON array of {factory_name, deployment_date} objects
   status: PacketStatus
   entered_by: string
   counted_by?: string | null   // person who counted & repacked
@@ -171,6 +172,9 @@ export async function initDB() {
     ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS collected_by TEXT;
     ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS assigned_to TEXT;
     ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS repack_photo_urls TEXT;
+    ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS factory_entries TEXT;
+    CREATE INDEX IF NOT EXISTS sd_packets_status_idx ON sd_packets(status);
+    CREATE INDEX IF NOT EXISTS sd_packets_created_at_idx ON sd_packets(created_at DESC);
 
     CREATE TABLE IF NOT EXISTS ingestion_records (
       id SERIAL PRIMARY KEY,
@@ -519,7 +523,7 @@ export async function updatePacket(id: number, fields: Partial<Omit<SdPacket, 'i
   const allowed = [
     'team_name', 'factory', 'date_received', 'sd_card_count', 'num_packages',
     'deployment_date', 'notes', 'status', 'entered_by', 'counted_by', 'collected_by',
-    'assigned_to', 'poc_emails', 'repack_photo_urls',
+    'assigned_to', 'poc_emails', 'repack_photo_urls', 'factory_entries',
   ] as const
   const sets: string[] = []
   const values: unknown[] = []

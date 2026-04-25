@@ -170,6 +170,11 @@ router.post('/:id/events', async (req: Request, res: Response) => {
         ? JSON.stringify(event_data.repack_photo_urls)
         : null
 
+      // Multiple factory entries (each has factory_name + deployment_date)
+      const factoryEntries = event_data.factory_entries
+        ? JSON.stringify(event_data.factory_entries)
+        : JSON.stringify([{ factory_name: factoryName, deployment_date: deployDate }])
+
       const updatedPacket = await updatePacket(id, {
         status:             'counted_and_repacked',
         sd_card_count:      sdCount,
@@ -178,6 +183,7 @@ router.post('/:id/events', async (req: Request, res: Response) => {
         deployment_date:    deployDate ?? undefined,
         counted_by:         countedBy,
         repack_photo_urls:  repackPhotos ?? undefined,
+        factory_entries:    factoryEntries,
       })
 
       // Auto-create a "received" transaction in the inventory tracker
