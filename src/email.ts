@@ -16,11 +16,12 @@ function getTransporter() {
 }
 
 const ROLE_LABEL: Partial<Record<UserRole, string>> & Record<string, string> = {
-  admin:          'Admin',
-  logistics:      'Logistics',
-  ingestion:      'Ingestion Team',
-  ingestion_lead: 'Ingestion Lead',
-  user:           'Viewer',
+  admin:           'Admin',
+  logistics:       'Logistics',
+  logistics_lead:  'Logistics Lead',
+  ingestion:       'Ingestion Team',
+  ingestion_lead:  'Ingestion Lead',
+  user:            'Viewer',
 }
 
 // ─── OTP Email ────────────────────────────────────────────────────────────────

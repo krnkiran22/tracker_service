@@ -12,7 +12,7 @@ export type PacketStatus =
   | 'received_at_hq'
   | 'counted_and_repacked'
   | 'collected_for_ingestion'
-export type UserRole = 'admin' | 'logistics' | 'ingestion' | 'ingestion_lead' | 'user'
+export type UserRole = 'admin' | 'logistics' | 'logistics_lead' | 'ingestion' | 'ingestion_lead' | 'user'
 
 export interface AppUser {
   id: number
@@ -237,7 +237,7 @@ export async function initDB() {
     BEGIN
       ALTER TABLE app_users DROP CONSTRAINT IF EXISTS app_users_role_check;
       ALTER TABLE app_users ADD CONSTRAINT app_users_role_check
-        CHECK (role IN ('admin', 'logistics', 'ingestion', 'ingestion_lead', 'user'));
+        CHECK (role IN ('admin', 'logistics', 'logistics_lead', 'ingestion', 'ingestion_lead', 'user'));
     EXCEPTION WHEN others THEN NULL;
     END $$;
   `)
@@ -700,6 +700,25 @@ export async function getSdEventsByPacketId(packet_id: number): Promise<SdEvent[
   const res = await db.query(
     `SELECT * FROM sd_events WHERE packet_id = $1 ORDER BY created_at ASC`,
     [packet_id]
+  )
+  return res.rows
+}
+
+export interface EventWithPacket extends SdEvent {
+  team_name: string
+}
+
+// All events with their packet's team_name, newest first — used by the Logs page
+export async function getRecentEvents(limit = 300): Promise<EventWithPacket[]> {
+  const db = getPool()
+  const res = await db.query(
+    `SELECT e.id, e.packet_id, e.event_type, e.event_data, e.created_at,
+            p.team_name
+     FROM sd_events e
+     JOIN sd_packets p ON p.id = e.packet_id
+     ORDER BY e.created_at DESC
+     LIMIT $1`,
+    [limit]
   )
   return res.rows
 }

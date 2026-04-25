@@ -7,6 +7,7 @@ import teamsRouter from './routes/teams'
 import packetsRouter from './routes/packets'
 import authRouter from './routes/auth'
 import adminRouter from './routes/admin'
+import eventsRouter from './routes/events'
 import { execSync as _execSync } from 'child_process'
 import { initWhatsApp, getIsReady } from './whatsapp'
 import * as WhatsAppModule from './whatsapp'
@@ -117,6 +118,7 @@ app.use('/api/transactions', transactionsRouter)
 app.use('/api/teams',        teamsRouter)
 app.use('/api/packets',      packetsRouter)
 app.use('/api/admin',        adminRouter)
+app.use('/api/events',       eventsRouter)
 
 // ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }))
