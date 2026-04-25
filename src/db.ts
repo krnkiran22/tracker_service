@@ -175,6 +175,8 @@ export async function initDB() {
     ALTER TABLE sd_packets ADD COLUMN IF NOT EXISTS factory_entries TEXT;
     CREATE INDEX IF NOT EXISTS sd_packets_status_idx ON sd_packets(status);
     CREATE INDEX IF NOT EXISTS sd_packets_created_at_idx ON sd_packets(created_at DESC);
+    CREATE INDEX IF NOT EXISTS sd_packets_status_date_idx ON sd_packets(status, date_received DESC, created_at DESC);
+    CREATE INDEX IF NOT EXISTS sd_packets_date_created_idx ON sd_packets(date_received DESC, created_at DESC);
 
     CREATE TABLE IF NOT EXISTS ingestion_records (
       id SERIAL PRIMARY KEY,
@@ -433,25 +435,51 @@ export async function insertPacket(p: Omit<SdPacket, 'id' | 'created_at'> & { st
   return res.rows[0]
 }
 
-export async function getPackets(filters?: { status?: PacketStatus }): Promise<SdPacket[]> {
+// ── Column projection helpers ─────────────────────────────────────────────────
+// Arrival photos (photo_url, photo_urls) are large base64 strings never shown
+// in any list view — only needed when viewing a single packet detail.
+// Repack photos (repack_photo_urls) are shown in the ready-to-ingest and
+// collect-sdc card thumbnails, so they're included when requested.
+const LEAN_COLS = `
+  id, team_name, factory, factory_entries, date_received, sd_card_count,
+  num_packages, deployment_date, status, notes, entered_by,
+  counted_by, collected_by, assigned_to, poc_emails, poc_phones, created_at
+`
+// With repack thumbnails but still without bulky arrival photos
+const REPACK_COLS = `
+  id, team_name, factory, factory_entries, date_received, sd_card_count,
+  num_packages, deployment_date, repack_photo_urls, status, notes, entered_by,
+  counted_by, collected_by, assigned_to, poc_emails, poc_phones, created_at
+`
+
+export async function getPackets(
+  filters?: { status?: PacketStatus },
+  opts?: { repackPhotos?: boolean; limit?: number }
+): Promise<SdPacket[]> {
   const db = getPool()
+  const cols = opts?.repackPhotos ? REPACK_COLS : LEAN_COLS
   const conditions: string[] = []
   const values: unknown[] = []
   if (filters?.status) { conditions.push(`status = $1`); values.push(filters.status) }
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+  const where       = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+  const limitClause = opts?.limit ? `LIMIT ${opts.limit}` : ''
   const res = await db.query(
-    `SELECT * FROM sd_packets ${where} ORDER BY date_received DESC, created_at DESC`,
+    `SELECT ${cols} FROM sd_packets ${where} ORDER BY date_received DESC, created_at DESC ${limitClause}`,
     values
   )
   return res.rows
 }
 
-export async function getPacketsByStatuses(statuses: PacketStatus[]): Promise<SdPacket[]> {
+export async function getPacketsByStatuses(
+  statuses: PacketStatus[],
+  opts?: { repackPhotos?: boolean }
+): Promise<SdPacket[]> {
   if (!statuses.length) return []
   const db = getPool()
+  const cols = opts?.repackPhotos ? REPACK_COLS : LEAN_COLS
   const placeholders = statuses.map((_, i) => `$${i + 1}`).join(', ')
   const res = await db.query(
-    `SELECT * FROM sd_packets WHERE status IN (${placeholders}) ORDER BY date_received DESC, created_at DESC`,
+    `SELECT ${cols} FROM sd_packets WHERE status IN (${placeholders}) ORDER BY date_received DESC, created_at DESC`,
     statuses
   )
   return res.rows
@@ -464,7 +492,10 @@ export async function getCompletedPacketsWithRecords(): Promise<
   const db = getPool()
   const res = await db.query(`
     SELECT
-      p.*,
+      p.id, p.team_name, p.factory, p.factory_entries,
+      p.date_received, p.sd_card_count, p.num_packages, p.deployment_date,
+      p.status, p.notes, p.entered_by, p.counted_by, p.collected_by,
+      p.assigned_to, p.poc_emails, p.poc_phones, p.created_at,
       ir.id            AS ir_id,
       ir.industry      AS ir_industry,
       ir.actual_count  AS ir_actual_count,

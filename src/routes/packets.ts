@@ -37,17 +37,25 @@ router.get('/completed-with-records', async (_req: Request, res: Response) => {
 
 // GET /api/packets
 // Supports ?status=single  OR  ?statuses=a,b,c  for multi-status filtering
+// Optional ?repack_photos=1  — include repack_photo_urls in response
+//   (only needed for ready-to-ingest and collect-sdc card thumbnails)
+// Optional ?limit=N          — cap number of rows (default 500 for unfiltered)
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const status   = req.query.status   as PacketStatus | undefined
-    const statuses = req.query.statuses as string | undefined
+    const status        = req.query.status        as PacketStatus | undefined
+    const statuses      = req.query.statuses      as string | undefined
+    const repackPhotos  = req.query.repack_photos === '1'
+    const limitParam    = req.query.limit          as string | undefined
+    const limit         = limitParam ? Math.min(Number(limitParam), 2000) : undefined
 
     let packets
     if (statuses) {
       const list = statuses.split(',').map(s => s.trim()).filter(Boolean) as PacketStatus[]
-      packets = await getPacketsByStatuses(list)
+      packets = await getPacketsByStatuses(list, { repackPhotos })
     } else {
-      packets = await getPackets(status ? { status } : undefined)
+      // For unfiltered (all-packets log view) cap at 500 rows to avoid huge payloads
+      const effectiveLimit = limit ?? (status ? undefined : 500)
+      packets = await getPackets(status ? { status } : undefined, { repackPhotos, limit: effectiveLimit })
     }
     res.json(packets)
   } catch (err) {
