@@ -61,9 +61,35 @@ client.on(Events.MessageCreate, async (msg) => {
       await msg.reply(
         `❌ Wrong format. Use:\n` +
         `\`@bot arrival TeamName | ReceivedBy | PhoneNumber\`\n\n` +
-        `Example: \`@bot arrival Greybeez | Naresh | 9876543210\``
+        `Example: \`@bot arrival Greybeez | Naresh | 9876543210\`\n` +
+        `You can also attach photos directly to the message.`
       )
       return
+    }
+
+    // ── Download attachments and convert to base64 ──────────────────────────
+    const attachments = [...msg.attachments.values()].filter(a =>
+      a.contentType?.startsWith('image/')
+    )
+
+    let photoBase64List = []
+    if (attachments.length > 0) {
+      const processingMsg = await msg.reply(`⏳ Downloading ${attachments.length} photo(s)…`)
+      try {
+        photoBase64List = await Promise.all(
+          attachments.map(async (att) => {
+            const res = await fetch(att.url)
+            const buffer = await res.arrayBuffer()
+            const base64 = Buffer.from(buffer).toString('base64')
+            const mime = att.contentType || 'image/jpeg'
+            return `data:${mime};base64,${base64}`
+          })
+        )
+        await processingMsg.delete().catch(() => {})
+      } catch (err) {
+        await processingMsg.edit(`⚠️ Failed to download photos: ${err.message}. Logging without photos.`)
+        photoBase64List = []
+      }
     }
 
     try {
@@ -75,7 +101,7 @@ client.on(Events.MessageCreate, async (msg) => {
           received_date: new Date().toISOString().slice(0, 10),
           entered_by: received_by,
           poc_phones: phone || '',
-          photo_urls: null,
+          photo_urls: photoBase64List.length > 0 ? JSON.stringify(photoBase64List) : null,
         }),
       })
       const data = await res.json()
@@ -86,7 +112,8 @@ client.on(Events.MessageCreate, async (msg) => {
         `📦 Packet **#${data.id}** — **${team_name}**\n` +
         `👤 Received by **${received_by}**` +
         (phone ? `\n📱 ${phone}` : '') +
-        `\n\nVisible in the tracker: https://sd-tracker.vercel.app/logistics/log-arrival`
+        (photoBase64List.length > 0 ? `\n🖼️ ${photoBase64List.length} photo(s) saved` : '\n📷 No photos attached') +
+        `\n\n🔗 https://sd-tracker.vercel.app/logistics/log-arrival`
       )
     } catch (err) {
       await msg.reply(`❌ Failed to log arrival: ${err.message}`)

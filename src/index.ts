@@ -44,7 +44,7 @@ app.use(cors({
   credentials: true,
 }))
 
-app.use(express.json({ limit: '10mb' }))   // allow photo data-URLs
+app.use(express.json({ limit: '50mb' }))   // allow multiple photo data-URLs from Discord bot
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }))
