@@ -263,6 +263,17 @@ router.patch('/:id', async (req: Request, res: Response) => {
     const packet = await getPacketById(id)
     if (!packet) { res.status(404).json({ error: 'Not found' }); return }
 
+    // ── update_photos — called by Discord bot after arrival/repack ────────────
+    if (action === 'update_photos') {
+      const { photo_urls, repack_photo_urls } = ingestionData
+      const updated = await updatePacket(id, {
+        ...(photo_urls        !== undefined ? { photo_urls }        : {}),
+        ...(repack_photo_urls !== undefined ? { repack_photo_urls } : {}),
+      })
+      res.json(updated)
+      return
+    }
+
     if (action === 'acknowledge') {
       if (packet.status !== 'received') {
         res.status(400).json({ error: 'Packet is not in received state' })
