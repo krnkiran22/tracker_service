@@ -78,10 +78,19 @@ const COMMANDS = [
   },
 ]
 
-async function registerCommands() {
+async function registerCommands(client) {
   const rest = new REST().setToken(process.env.DISCORD_TOKEN)
-  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: COMMANDS })
-  console.log('✅ Slash commands registered')
+  // Register to every guild the bot is in — takes effect instantly
+  const guilds = client.guilds.cache.map(g => g.id)
+  for (const guildId of guilds) {
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: COMMANDS })
+    console.log(`✅ Slash commands registered in guild ${guildId}`)
+  }
+  if (!guilds.length) {
+    // Fallback to global if no guilds found
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: COMMANDS })
+    console.log('✅ Slash commands registered globally')
+  }
 }
 
 // ── Discord client ────────────────────────────────────────────────────────────
@@ -95,7 +104,7 @@ const client = new Client({
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`✅ Bot online as ${c.user.tag}`)
-  await registerCommands()
+  await registerCommands(c)
 })
 
 // ── Interaction handler ───────────────────────────────────────────────────────
@@ -137,7 +146,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
           .setCustomId('received_date')
-          .setLabel('Date Received (YYYY-MM-DD, leave blank = today)')
+          .setLabel('Date Received (YYYY-MM-DD, blank=today)')
           .setStyle(TextInputStyle.Short)
           .setPlaceholder(today())
           .setRequired(false)
@@ -244,7 +253,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
           .setCustomId('counts')
-          .setLabel('SD Count | Missing | Packages  (e.g. 192 | 3 | 2)')
+          .setLabel('SD Count / Missing / Packages (192|3|2)')
           .setStyle(TextInputStyle.Short)
           .setPlaceholder('192 | 0 | 1')
           .setRequired(true)
