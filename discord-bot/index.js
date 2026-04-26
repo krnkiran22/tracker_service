@@ -68,6 +68,10 @@ const COMMANDS = [
     name: 'ready',
     description: '🚀 Show all packets ready to ingest',
   },
+  {
+    name: 'help',
+    description: '📖 Show the message template for this channel',
+  },
 ]
 
 async function registerCommands(client) {
@@ -120,6 +124,55 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } catch (err) {
       await interaction.editReply(`❌ ${err.message}`)
     }
+    return
+  }
+
+  // ── /help ─────────────────────────────────────────────────────────────────
+  if (interaction.commandName === 'help') {
+    const ch = interaction.channel.name
+
+    if (ch === CH_ARRIVAL) {
+      await interaction.reply(
+        `**📦 #arrival — Log a new SD card packet**\n\n` +
+        `Send a message in this format:\n` +
+        `\`\`\`\n/arrival\nTeam: Dukaan\nReceived by: Naresh\nPhone: 9876543210\nDate: 2026-04-26\n\`\`\`` +
+        `\n\n_Phone and Date are optional. Attach photos to the same message._`
+      )
+      return
+    }
+
+    if (ch === CH_COUNT) {
+      await interaction.reply(
+        `**✅ #count_repack — Count & Repack a packet**\n\n` +
+        `First use \`/list\` to get the packet ID, then send:\n` +
+        `\`\`\`\n/count 42\nFactory Name,YYYY-MM-DD,SD Count,Missing,Packages\nFactory Name,YYYY-MM-DD,SD Count,Missing,Packages\nCounted by: Naresh\nNotes: optional\n\`\`\`` +
+        `\n\n**Example:**\n` +
+        `\`\`\`\n/count 42\nDyna Fashion,2026-04-25,192,3,2\nAttire,2026-04-25,37,0,1\nCounted by: Naresh\nNotes: Good condition\n\`\`\`` +
+        `\n\n_Add as many factory lines as needed. Attach photos to the same message._`
+      )
+      return
+    }
+
+    if (ch === CH_COLLECT) {
+      await interaction.reply(
+        `**📤 #ready_to_ingest — Collect a packet for ingestion**\n\n` +
+        `First use \`/ready\` to get the packet ID, then send:\n` +
+        `\`\`\`\n/collect 42\nAssigned to: Aslam\nCollected by: Naresh\n\`\`\``
+      )
+      return
+    }
+
+    // Generic help for any other channel
+    await interaction.reply(
+      `**📖 SD Tracker Bot — Commands**\n\n` +
+      `**#arrival** → type \`/arrival\` + template\n` +
+      `**#count_repack** → type \`/count <id>\` + factory lines\n` +
+      `**#ready_to_ingest** → type \`/collect <id>\` + template\n\n` +
+      `**Slash commands:**\n` +
+      `\`/list\` — packets pending count & repack\n` +
+      `\`/ready\` — packets ready to ingest\n` +
+      `\`/help\` — show template for this channel`
+    )
     return
   }
 
