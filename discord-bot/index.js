@@ -151,6 +151,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 })
 
+// ── Channel name config ───────────────────────────────────────────────────────
+const CH_ARRIVAL  = 'arrival'         // only /arrival allowed here
+const CH_COUNT    = 'count_repack'    // only /count allowed here
+const CH_COLLECT  = 'ready_to_ingest' // only /collect allowed here
+
 // ── Message command handler ───────────────────────────────────────────────────
 // Handles: /arrival, /count <id>, /collect <id>
 // Photos can be attached to the SAME message — no need to reply separately.
@@ -176,6 +181,10 @@ client.on(Events.MessageCreate, async (msg) => {
   //   Date: 2026-04-25         (optional, defaults to today)
   // ══════════════════════════════════════════════════════════════════════════
   if (first.toLowerCase() === '/arrival') {
+    if (msg.channel.name !== CH_ARRIVAL) {
+      await msg.reply(`❌ Use \`/arrival\` only in the **#${CH_ARRIVAL}** channel.`)
+      return
+    }
     const kv          = parseKV(lines.slice(1))
     const team_name   = kv['team'] || kv['team_name']
     const received_by = kv['received_by'] || kv['received by'] || kv['by']
@@ -240,6 +249,10 @@ client.on(Events.MessageCreate, async (msg) => {
   // ══════════════════════════════════════════════════════════════════════════
   const countMatch = first.match(/^\/count\s+(\d+)/i)
   if (countMatch) {
+    if (msg.channel.name !== CH_COUNT) {
+      await msg.reply(`❌ Use \`/count\` only in the **#${CH_COUNT}** channel.`)
+      return
+    }
     const packetId       = Number(countMatch[1])
     const factory_entries = []
     const parseErrors     = []
@@ -344,6 +357,10 @@ client.on(Events.MessageCreate, async (msg) => {
   // ══════════════════════════════════════════════════════════════════════════
   const collectMatch = first.match(/^\/collect\s+(\d+)/i)
   if (collectMatch) {
+    if (msg.channel.name !== CH_COLLECT) {
+      await msg.reply(`❌ Use \`/collect\` only in the **#${CH_COLLECT}** channel.`)
+      return
+    }
     const packetId   = Number(collectMatch[1])
     const kv         = parseKV(lines.slice(1))
     const assigned_to  = kv['assigned_to']  || kv['assigned to']  || kv['assign_to'] || kv['assign to']
