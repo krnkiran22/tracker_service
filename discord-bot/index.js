@@ -3,19 +3,15 @@ require('dotenv').config()
 const {
   Client, GatewayIntentBits, Events,
   REST, Routes,
-  ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder,
 } = require('discord.js')
 
-const CLIENT_ID  = process.env.CLIENT_ID  || '1497976137345667173'
-const BACKEND    = process.env.BACKEND_URL || 'https://trackerservice-production.up.railway.app'
+const CLIENT_ID   = process.env.CLIENT_ID  || '1497976137345667173'
+const BACKEND     = process.env.BACKEND_URL || 'https://trackerservice-production.up.railway.app'
 const TRACKER_URL = 'https://sd-tracker.vercel.app'
-
-// In-memory: reply messageId → { packetId, type: 'arrival' | 'repack' }
-const photoPending = new Map()
 
 // ── API helper ────────────────────────────────────────────────────────────────
 async function api(path, opts = {}) {
-  const res = await fetch(`${BACKEND}${path}`, {
+  const res  = await fetch(`${BACKEND}${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...opts,
   })
@@ -33,6 +29,13 @@ async function toBase64(att) {
   return `data:${mime};base64,${b64}`
 }
 
+// Extract image attachments from a message → base64 list
+async function extractPhotos(msg) {
+  const images = [...msg.attachments.values()].filter(a => a.contentType?.startsWith('image/'))
+  if (!images.length) return []
+  return Promise.all(images.map(toBase64))
+}
+
 function fmtDate(d) {
   if (!d) return '—'
   return new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
@@ -42,52 +45,39 @@ function today() {
   return new Date().toISOString().slice(0, 10)
 }
 
-// ── Slash command definitions ─────────────────────────────────────────────────
+// Parse "Key: Value" lines into an object
+function parseKV(lines) {
+  const out = {}
+  for (const line of lines) {
+    const idx = line.indexOf(':')
+    if (idx < 0) continue
+    const key = line.slice(0, idx).trim().toLowerCase().replace(/\s+/g, '_')
+    const val = line.slice(idx + 1).trim()
+    if (val) out[key] = val
+  }
+  return out
+}
+
+// ── Slash command definitions — read-only only ────────────────────────────────
 const COMMANDS = [
-  {
-    name: 'arrival',
-    description: '📦 Log a new SD card packet arrival',
-  },
   {
     name: 'list',
     description: '📋 List all packets pending Count & Repack',
   },
   {
-    name: 'count',
-    description: '✅ Count and repack a packet',
-    options: [{
-      name: 'id',
-      description: 'Packet ID (from /list)',
-      type: 4,      // INTEGER
-      required: true,
-    }],
-  },
-  {
     name: 'ready',
     description: '🚀 Show all packets ready to ingest',
-  },
-  {
-    name: 'collect',
-    description: '📤 Collect a packet for ingestion',
-    options: [{
-      name: 'id',
-      description: 'Packet ID (from /ready)',
-      type: 4,
-      required: true,
-    }],
   },
 ]
 
 async function registerCommands(client) {
-  const rest = new REST().setToken(process.env.DISCORD_TOKEN)
-  // Register to every guild the bot is in — takes effect instantly
+  const rest   = new REST().setToken(process.env.DISCORD_TOKEN)
   const guilds = client.guilds.cache.map(g => g.id)
   for (const guildId of guilds) {
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: COMMANDS })
     console.log(`✅ Slash commands registered in guild ${guildId}`)
   }
   if (!guilds.length) {
-    // Fallback to global if no guilds found
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: COMMANDS })
     console.log('✅ Slash commands registered globally')
   }
@@ -107,115 +97,25 @@ client.once(Events.ClientReady, async (c) => {
   await registerCommands(c)
 })
 
-// ── Interaction handler ───────────────────────────────────────────────────────
+// ── Slash command handler — /list and /ready ──────────────────────────────────
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return
 
-  // ════════════════════════════════════════════════════════════
-  // /arrival  →  show modal
-  // ════════════════════════════════════════════════════════════
-  if (interaction.isChatInputCommand() && interaction.commandName === 'arrival') {
-    const modal = new ModalBuilder()
-      .setCustomId('modal_arrival')
-      .setTitle('📦 Log New SD Card Arrival')
-
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('team_name')
-          .setLabel('Team Name *')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder('e.g. Greybeez')
-          .setRequired(true)
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('received_by')
-          .setLabel('Received By *')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder('e.g. Naresh')
-          .setRequired(true)
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('phone')
-          .setLabel('WhatsApp Number (10 digits)')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder('e.g. 9876543210')
-          .setRequired(false)
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('received_date')
-          .setLabel('Date Received (YYYY-MM-DD, blank=today)')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder(today())
-          .setRequired(false)
-      ),
-    )
-
-    await interaction.showModal(modal)
-    return
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // modal_arrival  →  save packet
-  // ════════════════════════════════════════════════════════════
-  if (interaction.isModalSubmit() && interaction.customId === 'modal_arrival') {
-    await interaction.deferReply()
-
-    const team_name     = interaction.fields.getTextInputValue('team_name').trim()
-    const received_by   = interaction.fields.getTextInputValue('received_by').trim()
-    const phone         = interaction.fields.getTextInputValue('phone').trim()
-    const date_raw      = interaction.fields.getTextInputValue('received_date').trim()
-    const received_date = date_raw || today()
-
-    try {
-      const packet = await api('/api/packets', {
-        method: 'POST',
-        body: JSON.stringify({
-          team_name,
-          received_date,
-          entered_by: received_by,
-          poc_phones:  phone || '',
-          photo_urls:  null,
-        }),
-      })
-
-      const reply = await interaction.editReply(
-        `✅ **Packet #${packet.id} logged!**\n` +
-        `📦 **${team_name}** · received by **${received_by}**` +
-        (phone ? ` · 📱 ${phone}` : '') + '\n\n' +
-        `📸 **Reply to this message with photos** of the packet to attach them.\n` +
-        `_(or skip if no photos)_`
-      )
-
-      photoPending.set(reply.id, { packetId: packet.id, type: 'arrival' })
-      setTimeout(() => photoPending.delete(reply.id), 15 * 60 * 1000)
-    } catch (err) {
-      await interaction.editReply(`❌ Failed to log arrival: ${err.message}`)
-    }
-    return
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // /list  →  show pending packets
-  // ════════════════════════════════════════════════════════════
-  if (interaction.isChatInputCommand() && interaction.commandName === 'list') {
+  // ── /list ─────────────────────────────────────────────────────────────────
+  if (interaction.commandName === 'list') {
     await interaction.deferReply()
     try {
       const packets = await api('/api/packets?status=received_at_hq')
       if (!packets.length) {
-        await interaction.editReply('✅ No packets pending Count & Repack. All clear!')
+        await interaction.editReply('✅ No packets pending Count & Repack.')
         return
       }
-
       const lines = packets.map(p =>
         `**#${p.id}** · **${p.team_name}** · received ${fmtDate(p.date_received)}${p.entered_by ? ` · by ${p.entered_by}` : ''}`
       ).join('\n')
-
       await interaction.editReply(
         `📋 **Packets Pending Count & Repack** (${packets.length})\n\n${lines}\n\n` +
-        `▶️ Use \`/count id:<ID>\` to count a packet`
+        `▶️ Send a message starting with \`/count 42\` to count a packet`
       )
     } catch (err) {
       await interaction.editReply(`❌ ${err.message}`)
@@ -223,135 +123,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return
   }
 
-  // ════════════════════════════════════════════════════════════
-  // /count <id>  →  show modal (multi-factory, one line each)
-  // ════════════════════════════════════════════════════════════
-  if (interaction.isChatInputCommand() && interaction.commandName === 'count') {
-    const packetId = interaction.options.getInteger('id')
-
-    const modal = new ModalBuilder()
-      .setCustomId(`modal_count_${packetId}`)
-      .setTitle(`Count & Repack — Packet #${packetId}`)
-
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('counted_by')
-          .setLabel('Counted By *')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder('e.g. Naresh')
-          .setRequired(true)
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('factories')
-          .setLabel('Factories (name | date | SD | missing | pkg)')
-          .setStyle(TextInputStyle.Paragraph)
-          .setPlaceholder(
-            'Dyna Fashion | 2026-04-25 | 192 | 3 | 2\nAttire | 2026-04-25 | 37 | 0 | 1\n\nOne factory per line.'
-          )
-          .setRequired(true)
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('notes')
-          .setLabel('Condition Notes (optional)')
-          .setStyle(TextInputStyle.Paragraph)
-          .setPlaceholder('Any notes about card condition…')
-          .setRequired(false)
-      ),
-    )
-
-    await interaction.showModal(modal)
-    return
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // modal_count submit  →  parse multi-factory lines, save
-  // ════════════════════════════════════════════════════════════
-  if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_count_')) {
-    await interaction.deferReply()
-    const packetId   = Number(interaction.customId.replace('modal_count_', ''))
-    const counted_by = interaction.fields.getTextInputValue('counted_by').trim()
-    const notes      = interaction.fields.getTextInputValue('notes').trim()
-    const rawLines   = interaction.fields.getTextInputValue('factories')
-
-    // Parse each non-empty line as: name | date | SD | missing | packages
-    const factory_entries = []
-    const parseErrors     = []
-
-    for (const raw of rawLines.split('\n')) {
-      const line = raw.trim()
-      if (!line) continue
-      const parts = line.split('|').map(s => s.trim())
-      const [factory_name, deployment_date, rawSd, rawMissing, rawPkg] = parts
-      const count   = Number(rawSd)    || 0
-      const missing = Number(rawMissing) || 0
-      const pkg     = Number(rawPkg)   || 1
-
-      if (!factory_name || !deployment_date || count <= 0) {
-        parseErrors.push(`⚠️ Skipped invalid line: \`${line}\``)
-        continue
-      }
-      factory_entries.push({ factory_name, deployment_date, count, missing, num_packages: pkg })
-    }
-
-    if (!factory_entries.length) {
-      await interaction.editReply(
-        `❌ No valid factory entries found.\n\nFormat per line:\n\`Factory Name | YYYY-MM-DD | SD Count | Missing | Packages\`\nExample: \`Dyna Fashion | 2026-04-25 | 192 | 3 | 2\``
-      )
-      return
-    }
-
-    const total_sd   = factory_entries.reduce((s, f) => s + f.count, 0)
-    const total_pkgs = factory_entries.reduce((s, f) => s + f.num_packages, 0)
-
-    try {
-      await api(`/api/packets/${packetId}/events`, {
-        method: 'POST',
-        body: JSON.stringify({
-          event_type: 'counted_and_repacked',
-          event_data: {
-            sd_card_count:    total_sd,
-            num_packages:     total_pkgs,
-            factory_entries,
-            condition_notes:  notes || null,
-            counted_by,
-            repack_photo_urls: [],
-          },
-        }),
-      })
-
-      // Build summary lines
-      const factoryLines = factory_entries.map(f =>
-        `  🏭 **${f.factory_name}** · 📅 ${f.deployment_date} · 💾 ${f.count} SD` +
-        (f.missing > 0 ? ` · ⚠️ ${f.missing} missing` : '') +
-        ` · 📦 ${f.num_packages} pkg`
-      ).join('\n')
-
-      const warningLines = parseErrors.length ? `\n\n${parseErrors.join('\n')}` : ''
-
-      const reply = await interaction.editReply(
-        `✅ **Packet #${packetId} counted & repacked!**\n` +
-        `👤 Counted by **${counted_by}** · ${factory_entries.length} factor${factory_entries.length === 1 ? 'y' : 'ies'}\n\n` +
-        `${factoryLines}\n\n` +
-        `**Total:** 💾 ${total_sd} SD cards · 📦 ${total_pkgs} package(s)` +
-        warningLines +
-        `\n\n📸 **Reply with packed photos** to attach them.\n_(or skip if no photos)_`
-      )
-
-      photoPending.set(reply.id, { packetId, type: 'repack' })
-      setTimeout(() => photoPending.delete(reply.id), 15 * 60 * 1000)
-    } catch (err) {
-      await interaction.editReply(`❌ Failed: ${err.message}`)
-    }
-    return
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // /ready  →  show counted packets
-  // ════════════════════════════════════════════════════════════
-  if (interaction.isChatInputCommand() && interaction.commandName === 'ready') {
+  // ── /ready ────────────────────────────────────────────────────────────────
+  if (interaction.commandName === 'ready') {
     await interaction.deferReply()
     try {
       const packets = await api('/api/packets?status=counted_and_repacked')
@@ -359,7 +132,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.editReply('✅ No packets ready to ingest yet.')
         return
       }
-
       const lines = packets.map(p => {
         let entries = []
         try { entries = JSON.parse(p.factory_entries || '[]') } catch {}
@@ -368,65 +140,221 @@ client.on(Events.InteractionCreate, async (interaction) => {
           : `${p.sd_card_count} cards`
         return `**#${p.id}** · **${p.team_name}** · ${info} · 📦 ${p.num_packages || 1} pkg`
       }).join('\n')
-
       await interaction.editReply(
         `🚀 **Packets Ready to Ingest** (${packets.length})\n\n${lines}\n\n` +
-        `▶️ Use \`/collect id:<ID>\` to collect a packet`
+        `▶️ Send \`/collect 42\` to collect a packet`
       )
     } catch (err) {
       await interaction.editReply(`❌ ${err.message}`)
     }
     return
   }
+})
 
-  // ════════════════════════════════════════════════════════════
-  // /collect <id>  →  show modal with ingestion person list
-  // ════════════════════════════════════════════════════════════
-  if (interaction.isChatInputCommand() && interaction.commandName === 'collect') {
-    const packetId = interaction.options.getInteger('id')
+// ── Message command handler ───────────────────────────────────────────────────
+// Handles: /arrival, /count <id>, /collect <id>
+// Photos can be attached to the SAME message — no need to reply separately.
+// Also handles reply-with-photos as a fallback (photoPending map).
+const photoPending = new Map() // replyMsgId → { packetId, type }
 
-    // Fetch real ingestion users from DB
-    let userHint = 'e.g. Naresh'
+client.on(Events.MessageCreate, async (msg) => {
+  if (msg.author.bot) return
+
+  const text  = msg.content.trim()
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+  if (!lines.length) return
+
+  const first = lines[0]
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // /arrival
+  // Template:
+  //   /arrival
+  //   Team: Dukaan
+  //   Received by: Naresh
+  //   Phone: 9876543210        (optional)
+  //   Date: 2026-04-25         (optional, defaults to today)
+  // ══════════════════════════════════════════════════════════════════════════
+  if (first.toLowerCase() === '/arrival') {
+    const kv          = parseKV(lines.slice(1))
+    const team_name   = kv['team'] || kv['team_name']
+    const received_by = kv['received_by'] || kv['received by'] || kv['by']
+    const phone       = kv['phone'] || kv['whatsapp'] || ''
+    const date_raw    = kv['date'] || kv['received_date'] || kv['date_received'] || ''
+    const date        = date_raw || today()
+
+    if (!team_name || !received_by) {
+      await msg.reply(
+        `❌ Missing required fields.\n\n**Format:**\n\`\`\`\n/arrival\nTeam: Dukaan\nReceived by: Naresh\nPhone: 9876543210\nDate: 2026-04-25\n\`\`\`\n_(Phone and Date are optional)_`
+      )
+      return
+    }
+
     try {
-      const users = await api('/api/admin/users?roles=ingestion,ingestion_lead')
-      if (users.length) userHint = users.map(u => u.name).join(', ')
-    } catch {}
+      // Download attached photos immediately (if any)
+      const photos = await extractPhotos(msg)
 
-    const modal = new ModalBuilder()
-      .setCustomId(`modal_collect_${packetId}`)
-      .setTitle(`📤 Collect Packet #${packetId}`)
+      const packet = await api('/api/packets', {
+        method: 'POST',
+        body: JSON.stringify({
+          team_name,
+          received_date: date,
+          entered_by:    received_by,
+          poc_phones:    phone,
+          photo_urls:    photos.length ? JSON.stringify(photos) : null,
+        }),
+      })
 
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('assigned_to')
-          .setLabel('Assign to Ingestion Person *')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder(userHint.slice(0, 100))
-          .setRequired(true)
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('collected_by')
-          .setLabel('Collected By (your name) *')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder(interaction.member?.displayName || interaction.user.username)
-          .setRequired(true)
-      ),
-    )
+      const photoNote = photos.length
+        ? `📸 ${photos.length} photo(s) saved.`
+        : `📸 Reply to this message with photos to attach them.`
 
-    await interaction.showModal(modal)
+      const reply = await msg.reply(
+        `✅ **Packet #${packet.id} logged!**\n` +
+        `📦 Team: **${team_name}** · Received by: **${received_by}**` +
+        (phone ? ` · 📱 ${phone}` : '') +
+        ` · 📅 ${fmtDate(date)}\n\n` +
+        photoNote + `\n\n` +
+        `▶️ Use \`/list\` to see all pending packets`
+      )
+
+      if (!photos.length) {
+        photoPending.set(reply.id, { packetId: packet.id, type: 'arrival' })
+        setTimeout(() => photoPending.delete(reply.id), 15 * 60 * 1000)
+      }
+    } catch (err) {
+      await msg.reply(`❌ Failed to log arrival: ${err.message}`)
+    }
     return
   }
 
-  // ════════════════════════════════════════════════════════════
-  // modal_collect submit  →  save event
-  // ════════════════════════════════════════════════════════════
-  if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_collect_')) {
-    await interaction.deferReply()
-    const packetId    = Number(interaction.customId.replace('modal_collect_', ''))
-    const assigned_to = interaction.fields.getTextInputValue('assigned_to').trim()
-    const collected_by = interaction.fields.getTextInputValue('collected_by').trim()
+  // ══════════════════════════════════════════════════════════════════════════
+  // /count <id>
+  // Template:
+  //   /count 42
+  //   Dyna Fashion | 2026-04-25 | 192 | 3 | 2
+  //   Attire       | 2026-04-25 | 37  | 0 | 1
+  //   (any number of factory lines...)
+  //   Counted by: Naresh
+  //   Notes: optional condition notes
+  // ══════════════════════════════════════════════════════════════════════════
+  const countMatch = first.match(/^\/count\s+(\d+)/i)
+  if (countMatch) {
+    const packetId       = Number(countMatch[1])
+    const factory_entries = []
+    const parseErrors     = []
+    let counted_by        = ''
+    let notes             = ''
+
+    for (const line of lines.slice(1)) {
+      if (line.toLowerCase().startsWith('counted by:') || line.toLowerCase().startsWith('counted_by:')) {
+        counted_by = line.split(':').slice(1).join(':').trim()
+        continue
+      }
+      if (line.toLowerCase().startsWith('notes:') || line.toLowerCase().startsWith('note:')) {
+        notes = line.split(':').slice(1).join(':').trim()
+        continue
+      }
+      if (!line.includes('|')) continue // skip non-factory lines
+
+      const parts          = line.split('|').map(s => s.trim())
+      const [factory_name, deployment_date, rawSd, rawMissing, rawPkg] = parts
+      const count          = Number(rawSd)      || 0
+      const missing        = Number(rawMissing) || 0
+      const num_packages   = Number(rawPkg)     || 1
+
+      if (!factory_name || !deployment_date || count <= 0) {
+        parseErrors.push(`⚠️ Skipped: \`${line}\``)
+        continue
+      }
+      factory_entries.push({ factory_name, deployment_date, count, missing, num_packages })
+    }
+
+    if (!factory_entries.length) {
+      await msg.reply(
+        `❌ No valid factory lines found.\n\n**Format:**\n\`\`\`\n/count 42\nDyna Fashion | 2026-04-25 | 192 | 3 | 2\nAttire | 2026-04-25 | 37 | 0 | 1\nCounted by: Naresh\nNotes: optional\n\`\`\`\n_Format per factory line: \`Name | YYYY-MM-DD | SD Count | Missing | Packages\`_`
+      )
+      return
+    }
+
+    if (!counted_by) {
+      await msg.reply(`❌ Missing **Counted by:** line.\n\nAdd a line like:\`Counted by: Naresh\``)
+      return
+    }
+
+    const total_sd   = factory_entries.reduce((s, f) => s + f.count, 0)
+    const total_pkgs = factory_entries.reduce((s, f) => s + f.num_packages, 0)
+
+    try {
+      // Download attached photos immediately (if any)
+      const photos = await extractPhotos(msg)
+
+      await api(`/api/packets/${packetId}/events`, {
+        method: 'POST',
+        body: JSON.stringify({
+          event_type: 'counted_and_repacked',
+          event_data: {
+            sd_card_count:     total_sd,
+            num_packages:      total_pkgs,
+            factory_entries,
+            condition_notes:   notes || null,
+            counted_by,
+            repack_photo_urls: photos.length ? photos : [],
+          },
+        }),
+      })
+
+      const factoryLines = factory_entries.map(f =>
+        `  🏭 **${f.factory_name}** · 📅 ${f.deployment_date} · 💾 ${f.count} SD` +
+        (f.missing > 0 ? ` · ⚠️ ${f.missing} missing` : '') +
+        ` · 📦 ${f.num_packages} pkg`
+      ).join('\n')
+
+      const photoNote = photos.length
+        ? `📸 ${photos.length} photo(s) saved.`
+        : `📸 Reply to this message with photos to attach them.`
+
+      const warnBlock = parseErrors.length ? `\n\n${parseErrors.join('\n')}` : ''
+
+      const reply = await msg.reply(
+        `✅ **Packet #${packetId} counted & repacked!**\n` +
+        `👤 Counted by **${counted_by}** · ${factory_entries.length} factor${factory_entries.length === 1 ? 'y' : 'ies'}\n\n` +
+        `${factoryLines}\n\n` +
+        `**Total:** 💾 ${total_sd} SD cards · 📦 ${total_pkgs} pkg` +
+        warnBlock + `\n\n` +
+        photoNote
+      )
+
+      if (!photos.length) {
+        photoPending.set(reply.id, { packetId, type: 'repack' })
+        setTimeout(() => photoPending.delete(reply.id), 15 * 60 * 1000)
+      }
+    } catch (err) {
+      await msg.reply(`❌ Failed: ${err.message}`)
+    }
+    return
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // /collect <id>
+  // Template:
+  //   /collect 42
+  //   Assigned to: Aslam
+  //   Collected by: Naresh
+  // ══════════════════════════════════════════════════════════════════════════
+  const collectMatch = first.match(/^\/collect\s+(\d+)/i)
+  if (collectMatch) {
+    const packetId   = Number(collectMatch[1])
+    const kv         = parseKV(lines.slice(1))
+    const assigned_to  = kv['assigned_to']  || kv['assigned to']  || kv['assign_to'] || kv['assign to']
+    const collected_by = kv['collected_by'] || kv['collected by'] || kv['by']
+
+    if (!assigned_to || !collected_by) {
+      await msg.reply(
+        `❌ Missing fields.\n\n**Format:**\n\`\`\`\n/collect 42\nAssigned to: Aslam\nCollected by: Naresh\n\`\`\``
+      )
+      return
+    }
 
     try {
       await api(`/api/packets/${packetId}/events`, {
@@ -437,51 +365,48 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }),
       })
 
-      await interaction.editReply(
+      await msg.reply(
         `✅ **Packet #${packetId} collected!**\n` +
-        `👤 Collected by **${collected_by}**\n` +
-        `➡️ Assigned to **${assigned_to}**\n\n` +
+        `👤 Collected by **${collected_by}** · Assigned to **${assigned_to}**\n\n` +
         `🔗 ${TRACKER_URL}`
       )
     } catch (err) {
-      await interaction.editReply(`❌ Failed: ${err.message}`)
+      await msg.reply(`❌ Failed: ${err.message}`)
     }
     return
   }
-})
 
-// ── Photo reply handler ───────────────────────────────────────────────────────
-// When user replies to a bot confirmation message with photos attached
-client.on(Events.MessageCreate, async (msg) => {
-  if (msg.author.bot) return
-  if (!msg.reference?.messageId) return
+  // ══════════════════════════════════════════════════════════════════════════
+  // Photo reply fallback — reply to a bot confirmation with images attached
+  // ══════════════════════════════════════════════════════════════════════════
+  if (msg.reference?.messageId) {
+    const pending = photoPending.get(msg.reference.messageId)
+    if (!pending) return
 
-  const pending = photoPending.get(msg.reference.messageId)
-  if (!pending) return
+    const images = [...msg.attachments.values()].filter(a => a.contentType?.startsWith('image/'))
+    if (!images.length) return
 
-  const images = [...msg.attachments.values()].filter(a => a.contentType?.startsWith('image/'))
-  if (!images.length) return
+    try {
+      const statusMsg  = await msg.reply(`⏳ Saving ${images.length} photo(s)…`)
+      const base64List = await Promise.all(images.map(toBase64))
+      const { packetId, type } = pending
 
-  try {
-    const statusMsg = await msg.reply(`⏳ Saving ${images.length} photo(s)…`)
-    const base64List = await Promise.all(images.map(toBase64))
-    const { packetId, type } = pending
+      await api(`/api/packets/${packetId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          action: 'update_photos',
+          ...(type === 'repack'
+            ? { repack_photo_urls: JSON.stringify(base64List) }
+            : { photo_urls: JSON.stringify(base64List) }
+          ),
+        }),
+      })
 
-    await api(`/api/packets/${packetId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({
-        action: 'update_photos',
-        ...(type === 'repack'
-          ? { repack_photo_urls: JSON.stringify(base64List) }
-          : { photo_urls: JSON.stringify(base64List) }
-        ),
-      }),
-    })
-
-    photoPending.delete(msg.reference.messageId)
-    await statusMsg.edit(`✅ ${images.length} photo(s) saved to packet #${packetId}!`)
-  } catch (err) {
-    await msg.reply(`❌ Failed to save photos: ${err.message}`)
+      photoPending.delete(msg.reference.messageId)
+      await statusMsg.edit(`✅ ${images.length} photo(s) saved to packet #${packetId}!`)
+    } catch (err) {
+      await msg.reply(`❌ Failed to save photos: ${err.message}`)
+    }
   }
 })
 
