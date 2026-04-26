@@ -255,9 +255,9 @@ client.on(Events.MessageCreate, async (msg) => {
         notes = line.split(':').slice(1).join(':').trim()
         continue
       }
-      if (!line.includes('|')) continue // skip non-factory lines
+      if (!line.includes(',')) continue // skip non-factory lines
 
-      const parts          = line.split('|').map(s => s.trim())
+      const parts          = line.split(',').map(s => s.trim())
       const [factory_name, deployment_date, rawSd, rawMissing, rawPkg] = parts
       const count          = Number(rawSd)      || 0
       const missing        = Number(rawMissing) || 0
@@ -272,7 +272,7 @@ client.on(Events.MessageCreate, async (msg) => {
 
     if (!factory_entries.length) {
       await msg.reply(
-        `❌ No valid factory lines found.\n\n**Format:**\n\`\`\`\n/count 42\nDyna Fashion | 2026-04-25 | 192 | 3 | 2\nAttire | 2026-04-25 | 37 | 0 | 1\nCounted by: Naresh\nNotes: optional\n\`\`\`\n_Format per factory line: \`Name | YYYY-MM-DD | SD Count | Missing | Packages\`_`
+        `❌ No valid factory lines found.\n\n**Format:**\n\`\`\`\n/count 42\nDyna Fashion, 2026-04-25, 192, 3, 2\nAttire, 2026-04-25, 37, 0, 1\nCounted by: Naresh\nNotes: optional\n\`\`\`\n_Format per factory line: \`Name, YYYY-MM-DD, SD Count, Missing, Packages\`_`
       )
       return
     }
