@@ -245,9 +245,15 @@ client.on(Events.MessageCreate, async (msg) => {
     const date_raw    = kv['date'] || kv['received_date'] || kv['date_received'] || ''
     const date        = date_raw || today()
 
-    if (!team_name || !received_by) {
+    // Detailed field-by-field validation
+    const arrivalErrors = []
+    if (!team_name)   arrivalErrors.push(`• **Team** is missing — add a line: \`Team: Dukaan\``)
+    if (!received_by) arrivalErrors.push(`• **Received by** is missing — add a line: \`Received by: Naresh\``)
+
+    if (arrivalErrors.length) {
       await msg.reply(
-        `❌ Missing required fields.\n\n**Format:**\n\`\`\`\n/arrival\nTeam: Dukaan\nReceived by: Naresh\nPhone: 9876543210\nDate: 2026-04-25\n\`\`\`\n_(Phone and Date are optional)_`
+        `❌ **Fix these issues and try again:**\n${arrivalErrors.join('\n')}\n\n` +
+        `**Full format:**\n\`\`\`\n/arrival\nTeam: Dukaan\nReceived by: Naresh\nPhone: 9876543210\nDate: 2026-04-26\n\`\`\`\n_(Phone and Date are optional)_`
       )
       return
     }
@@ -312,7 +318,9 @@ client.on(Events.MessageCreate, async (msg) => {
     let counted_by        = ''
     let notes             = ''
 
+    let lineNum = 1
     for (const line of lines.slice(1)) {
+      lineNum++
       if (line.toLowerCase().startsWith('counted by:') || line.toLowerCase().startsWith('counted_by:')) {
         counted_by = line.split(':').slice(1).join(':').trim()
         continue
@@ -329,22 +337,37 @@ client.on(Events.MessageCreate, async (msg) => {
       const missing        = Number(rawMissing) || 0
       const num_packages   = Number(rawPkg)     || 1
 
-      if (!factory_name || !deployment_date || count <= 0) {
-        parseErrors.push(`⚠️ Skipped: \`${line}\``)
+      // Detailed per-line validation
+      const lineErrors = []
+      if (!factory_name)                              lineErrors.push('factory name is empty')
+      if (!deployment_date)                           lineErrors.push('date is missing')
+      else if (!/^\d{4}-\d{2}-\d{2}$/.test(deployment_date)) lineErrors.push(`date \`${deployment_date}\` is invalid — use YYYY-MM-DD (e.g. 2026-04-25)`)
+      if (!rawSd || isNaN(Number(rawSd)))             lineErrors.push(`SD count \`${rawSd || '(empty)'}\` is not a number`)
+      else if (count <= 0)                            lineErrors.push('SD count must be greater than 0')
+      if (rawMissing && isNaN(Number(rawMissing)))    lineErrors.push(`missing count \`${rawMissing}\` is not a number`)
+      if (rawPkg && isNaN(Number(rawPkg)))            lineErrors.push(`packages \`${rawPkg}\` is not a number`)
+
+      if (lineErrors.length) {
+        parseErrors.push(`⚠️ Line ${lineNum} \`${line}\`\n   → ${lineErrors.join(', ')}`)
         continue
       }
       factory_entries.push({ factory_name, deployment_date, count, missing, num_packages })
     }
 
     if (!factory_entries.length) {
+      const errorBlock = parseErrors.length ? `\n\n**Issues found:**\n${parseErrors.join('\n')}` : ''
       await msg.reply(
-        `❌ No valid factory lines found.\n\n**Format:**\n\`\`\`\n/count 42\nDyna Fashion, 2026-04-25, 192, 3, 2\nAttire, 2026-04-25, 37, 0, 1\nCounted by: Naresh\nNotes: optional\n\`\`\`\n_Format per factory line: \`Name, YYYY-MM-DD, SD Count, Missing, Packages\`_`
+        `❌ No valid factory lines found.${errorBlock}\n\n` +
+        `**Format per factory line:**\n\`\`\`\nFactory Name,YYYY-MM-DD,SD Count,Missing,Packages\n\`\`\`` +
+        `**Example:**\n\`\`\`\n/count 42\nDyna Fashion,2026-04-25,192,3,2\nAttire,2026-04-25,37,0,1\nCounted by: Naresh\n\`\`\``
       )
       return
     }
 
     if (!counted_by) {
-      await msg.reply(`❌ Missing **Counted by:** line.\n\nAdd a line like:\`Counted by: Naresh\``)
+      await msg.reply(
+        `❌ **Missing "Counted by" line.**\n\nAdd this at the end of your message:\n\`Counted by: Naresh\``
+      )
       return
     }
 
@@ -419,9 +442,14 @@ client.on(Events.MessageCreate, async (msg) => {
     const assigned_to  = kv['assigned_to']  || kv['assigned to']  || kv['assign_to'] || kv['assign to']
     const collected_by = kv['collected_by'] || kv['collected by'] || kv['by']
 
-    if (!assigned_to || !collected_by) {
+    const collectErrors = []
+    if (!assigned_to)  collectErrors.push(`• **Assigned to** is missing — add: \`Assigned to: Aslam\``)
+    if (!collected_by) collectErrors.push(`• **Collected by** is missing — add: \`Collected by: Naresh\``)
+
+    if (collectErrors.length) {
       await msg.reply(
-        `❌ Missing fields.\n\n**Format:**\n\`\`\`\n/collect 42\nAssigned to: Aslam\nCollected by: Naresh\n\`\`\``
+        `❌ **Fix these issues and try again:**\n${collectErrors.join('\n')}\n\n` +
+        `**Full format:**\n\`\`\`\n/collect 42\nAssigned to: Aslam\nCollected by: Naresh\n\`\`\``
       )
       return
     }
