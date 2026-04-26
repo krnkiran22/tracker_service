@@ -224,46 +224,32 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   // ════════════════════════════════════════════════════════════
-  // /count <id>  →  show modal
+  // /count <id>  →  show modal (multi-factory, one line each)
   // ════════════════════════════════════════════════════════════
   if (interaction.isChatInputCommand() && interaction.commandName === 'count') {
     const packetId = interaction.options.getInteger('id')
 
     const modal = new ModalBuilder()
       .setCustomId(`modal_count_${packetId}`)
-      .setTitle(`✅ Count & Repack — Packet #${packetId}`)
+      .setTitle(`Count & Repack — Packet #${packetId}`)
 
     modal.addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('factory')
-          .setLabel('Factory Name *')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder('e.g. Dyna Fashion')
-          .setRequired(true)
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('deploy_date')
-          .setLabel('Deployment Date * (YYYY-MM-DD)')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder(today())
-          .setRequired(true)
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('counts')
-          .setLabel('SD Count / Missing / Packages (192|3|2)')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder('192 | 0 | 1')
-          .setRequired(true)
-      ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
           .setCustomId('counted_by')
           .setLabel('Counted By *')
           .setStyle(TextInputStyle.Short)
           .setPlaceholder('e.g. Naresh')
+          .setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('factories')
+          .setLabel('Factories (name | date | SD | missing | pkg)')
+          .setStyle(TextInputStyle.Paragraph)
+          .setPlaceholder(
+            'Dyna Fashion | 2026-04-25 | 192 | 3 | 2\nAttire | 2026-04-25 | 37 | 0 | 1\n\nOne factory per line.'
+          )
           .setRequired(true)
       ),
       new ActionRowBuilder().addComponents(
@@ -281,26 +267,44 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   // ════════════════════════════════════════════════════════════
-  // modal_count submit  →  save event
+  // modal_count submit  →  parse multi-factory lines, save
   // ════════════════════════════════════════════════════════════
   if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_count_')) {
     await interaction.deferReply()
-    const packetId    = Number(interaction.customId.replace('modal_count_', ''))
-    const factory     = interaction.fields.getTextInputValue('factory').trim()
-    const deploy_date = interaction.fields.getTextInputValue('deploy_date').trim()
-    const counted_by  = interaction.fields.getTextInputValue('counted_by').trim()
-    const notes       = interaction.fields.getTextInputValue('notes').trim()
+    const packetId   = Number(interaction.customId.replace('modal_count_', ''))
+    const counted_by = interaction.fields.getTextInputValue('counted_by').trim()
+    const notes      = interaction.fields.getTextInputValue('notes').trim()
+    const rawLines   = interaction.fields.getTextInputValue('factories')
 
-    // Parse "192 | 3 | 2" → sd_count=192, missing=3, packages=2
-    const parts      = interaction.fields.getTextInputValue('counts').split('|').map(s => Number(s.trim()) || 0)
-    const sd_count   = parts[0] || 0
-    const missing    = parts[1] || 0
-    const num_pkgs   = parts[2] || 1
+    // Parse each non-empty line as: name | date | SD | missing | packages
+    const factory_entries = []
+    const parseErrors     = []
 
-    if (!sd_count) {
-      await interaction.editReply('❌ SD Card Count must be greater than 0.')
+    for (const raw of rawLines.split('\n')) {
+      const line = raw.trim()
+      if (!line) continue
+      const parts = line.split('|').map(s => s.trim())
+      const [factory_name, deployment_date, rawSd, rawMissing, rawPkg] = parts
+      const count   = Number(rawSd)    || 0
+      const missing = Number(rawMissing) || 0
+      const pkg     = Number(rawPkg)   || 1
+
+      if (!factory_name || !deployment_date || count <= 0) {
+        parseErrors.push(`⚠️ Skipped invalid line: \`${line}\``)
+        continue
+      }
+      factory_entries.push({ factory_name, deployment_date, count, missing, num_packages: pkg })
+    }
+
+    if (!factory_entries.length) {
+      await interaction.editReply(
+        `❌ No valid factory entries found.\n\nFormat per line:\n\`Factory Name | YYYY-MM-DD | SD Count | Missing | Packages\`\nExample: \`Dyna Fashion | 2026-04-25 | 192 | 3 | 2\``
+      )
       return
     }
+
+    const total_sd   = factory_entries.reduce((s, f) => s + f.count, 0)
+    const total_pkgs = factory_entries.reduce((s, f) => s + f.num_packages, 0)
 
     try {
       await api(`/api/packets/${packetId}/events`, {
@@ -308,11 +312,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         body: JSON.stringify({
           event_type: 'counted_and_repacked',
           event_data: {
-            sd_card_count:    sd_count,
-            num_packages:     num_pkgs,
-            factory_name:     factory,
-            deployment_date:  deploy_date,
-            factory_entries:  [{ factory_name: factory, deployment_date: deploy_date, count: sd_count, missing }],
+            sd_card_count:    total_sd,
+            num_packages:     total_pkgs,
+            factory_entries,
             condition_notes:  notes || null,
             counted_by,
             repack_photo_urls: [],
@@ -320,14 +322,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }),
       })
 
+      // Build summary lines
+      const factoryLines = factory_entries.map(f =>
+        `  🏭 **${f.factory_name}** · 📅 ${f.deployment_date} · 💾 ${f.count} SD` +
+        (f.missing > 0 ? ` · ⚠️ ${f.missing} missing` : '') +
+        ` · 📦 ${f.num_packages} pkg`
+      ).join('\n')
+
+      const warningLines = parseErrors.length ? `\n\n${parseErrors.join('\n')}` : ''
+
       const reply = await interaction.editReply(
         `✅ **Packet #${packetId} counted & repacked!**\n` +
-        `🏭 **${factory}** · 📅 ${deploy_date}\n` +
-        `💾 **${sd_count}** SD cards` +
-        (missing > 0 ? ` · ⚠️ ${missing} missing` : '') +
-        ` · 📦 ${num_pkgs} package(s)\n` +
-        `👤 Counted by **${counted_by}**\n\n` +
-        `📸 **Reply with packed photos** to attach them.\n_(or skip if no photos)_`
+        `👤 Counted by **${counted_by}** · ${factory_entries.length} factor${factory_entries.length === 1 ? 'y' : 'ies'}\n\n` +
+        `${factoryLines}\n\n` +
+        `**Total:** 💾 ${total_sd} SD cards · 📦 ${total_pkgs} package(s)` +
+        warningLines +
+        `\n\n📸 **Reply with packed photos** to attach them.\n_(or skip if no photos)_`
       )
 
       photoPending.set(reply.id, { packetId, type: 'repack' })
