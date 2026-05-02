@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express'
 import {
-  insertPacket, getPackets, getPacketsByStatuses, getPacketById,
+  insertPacket, getPackets, getPacketsByStatuses, getPacketsByAssignee, getPacketById,
   updatePacketStatus, updatePacket, deletePacket,
   insertIngestionRecord, getIngestionRecordByPacketId,
   insertSdEvent, getSdEventsByPacketId,
@@ -37,6 +37,9 @@ router.get('/completed-with-records', async (_req: Request, res: Response) => {
 
 // GET /api/packets
 // Supports ?status=single  OR  ?statuses=a,b,c  for multi-status filtering
+// Optional ?assigned_to=<name> — case-insensitive filter on assigned_to
+//   (used by the Discord bot's per-ingestion-person channel /list)
+//   Can be combined with ?statuses to narrow down further.
 // Optional ?repack_photos=1  — include repack_photo_urls in response
 //   (only needed for ready-to-ingest and collect-sdc card thumbnails)
 // Optional ?limit=N          — cap number of rows (default 500 for unfiltered)
@@ -44,12 +47,18 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const status        = req.query.status        as PacketStatus | undefined
     const statuses      = req.query.statuses      as string | undefined
+    const assignedTo    = req.query.assigned_to   as string | undefined
     const repackPhotos  = req.query.repack_photos === '1'
     const limitParam    = req.query.limit          as string | undefined
     const limit         = limitParam ? Math.min(Number(limitParam), 2000) : undefined
 
     let packets
-    if (statuses) {
+    if (assignedTo) {
+      const statusList = statuses
+        ? (statuses.split(',').map(s => s.trim()).filter(Boolean) as PacketStatus[])
+        : status ? [status] : undefined
+      packets = await getPacketsByAssignee(assignedTo, statusList)
+    } else if (statuses) {
       const list = statuses.split(',').map(s => s.trim()).filter(Boolean) as PacketStatus[]
       packets = await getPacketsByStatuses(list, { repackPhotos })
     } else {
@@ -151,7 +160,7 @@ router.post('/:id/events', async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id)
     const { event_type, event_data } = req.body as {
-      event_type: 'counted_and_repacked' | 'collected_for_ingestion'
+      event_type: 'counted_and_repacked' | 'collected_for_ingestion' | 'ingestion_started'
       event_data: Record<string, unknown>
     }
 
@@ -219,13 +228,30 @@ router.post('/:id/events', async (req: Request, res: Response) => {
     }
 
     // ── collected_for_ingestion ──────────────────────────────────────────────
+    // Used by:
+    //   - Discord bot /assign (in #ready_to_ingest) — ingestion lead assigns
+    //     a packet to a specific ingestion person
+    //   - Legacy /collect command
     if (event_type === 'collected_for_ingestion') {
-      const collectedBy = String(event_data.collected_by ?? 'Ingestion')
+      const collectedBy = String(event_data.collected_by ?? event_data.assigned_by ?? 'Ingestion')
       const assignedTo  = event_data.assigned_to ? String(event_data.assigned_to) : null
       const updatedPacket = await updatePacket(id, {
         status:       'collected_for_ingestion',
         collected_by: collectedBy,
         ...(assignedTo ? { assigned_to: assignedTo } : {}),
+      })
+      res.status(201).json({ packet: updatedPacket, event })
+      return
+    }
+
+    // ── ingestion_started ────────────────────────────────────────────────────
+    // Used by the Discord bot /start command in each ingestion person's channel.
+    // Moves packet to `ingestion_started` status and stamps the starter's name.
+    if (event_type === 'ingestion_started') {
+      const startedBy = event_data.started_by ? String(event_data.started_by) : null
+      const updatedPacket = await updatePacket(id, {
+        status: 'ingestion_started',
+        ...(startedBy ? { assigned_to: startedBy } : {}),
       })
       res.status(201).json({ packet: updatedPacket, event })
       return
@@ -291,9 +317,10 @@ router.patch('/:id', async (req: Request, res: Response) => {
     }
 
     if (action === 'complete') {
-      // Allow completion from both the old `processing` state and the new
-      // logistics-pipeline `collected_for_ingestion` state
-      const completableStatuses = ['processing', 'collected_for_ingestion']
+      // Allow completion from old `processing`, the logistics handoff
+      // `collected_for_ingestion`, and the newer `ingestion_started` state
+      // (set by the Discord bot /start command).
+      const completableStatuses = ['processing', 'collected_for_ingestion', 'ingestion_started']
       if (!completableStatuses.includes(packet.status)) {
         res.status(400).json({ error: 'Packet cannot be completed from its current state' })
         return

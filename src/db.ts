@@ -12,6 +12,7 @@ export type PacketStatus =
   | 'received_at_hq'
   | 'counted_and_repacked'
   | 'collected_for_ingestion'
+  | 'ingestion_started'
 export type UserRole = 'admin' | 'logistics' | 'logistics_lead' | 'ingestion' | 'ingestion_lead' | 'user'
 
 export interface AppUser {
@@ -72,7 +73,12 @@ export interface IngestionRecord {
 export interface SdEvent {
   id: number
   packet_id: number
-  event_type: 'received_at_hq' | 'counted_and_repacked' | 'collected_for_ingestion'
+  event_type:
+    | 'received_at_hq'
+    | 'counted_and_repacked'
+    | 'collected_for_ingestion'
+    | 'ingestion_started'
+    | 'ingestion_completed'
   event_data: Record<string, unknown>
   created_at: string
 }
@@ -226,9 +232,14 @@ export async function initDB() {
     BEGIN
       ALTER TABLE sd_packets DROP CONSTRAINT IF EXISTS sd_packets_status_check;
       ALTER TABLE sd_packets ADD CONSTRAINT sd_packets_status_check
-        CHECK (status IN ('received','processing','completed','received_at_hq','counted_and_repacked','collected_for_ingestion'));
+        CHECK (status IN ('received','processing','completed','received_at_hq','counted_and_repacked','collected_for_ingestion','ingestion_started'));
     EXCEPTION WHEN others THEN NULL;
     END $$;
+  `)
+
+  // Helpful index for per-ingestion-person lookups from the Discord bot
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS sd_packets_assigned_to_idx ON sd_packets(LOWER(assigned_to));
   `)
 
   // Widen app_users role CHECK to include ingestion_lead
@@ -489,6 +500,35 @@ export async function getPacketsByStatuses(
   const res = await db.query(
     `SELECT ${cols} FROM sd_packets WHERE status IN (${placeholders}) ORDER BY date_received DESC, created_at DESC`,
     statuses
+  )
+  return res.rows
+}
+
+// Per-ingestion-person lookup — case-insensitive match on assigned_to.
+// Used by the Discord bot's /list in each #ingest-<name> channel.
+export async function getPacketsByAssignee(
+  assignedTo: string,
+  statuses?: PacketStatus[]
+): Promise<SdPacket[]> {
+  const db = getPool()
+  const name = assignedTo.trim().toLowerCase()
+  if (!name) return []
+
+  if (statuses && statuses.length) {
+    const placeholders = statuses.map((_, i) => `$${i + 2}`).join(', ')
+    const res = await db.query(
+      `SELECT ${REPACK_COLS} FROM sd_packets
+       WHERE LOWER(assigned_to) = $1 AND status IN (${placeholders})
+       ORDER BY date_received DESC, created_at DESC`,
+      [name, ...statuses]
+    )
+    return res.rows
+  }
+  const res = await db.query(
+    `SELECT ${REPACK_COLS} FROM sd_packets
+     WHERE LOWER(assigned_to) = $1
+     ORDER BY date_received DESC, created_at DESC`,
+    [name]
   )
   return res.rows
 }

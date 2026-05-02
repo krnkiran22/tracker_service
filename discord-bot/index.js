@@ -9,6 +9,35 @@ const CLIENT_ID   = process.env.CLIENT_ID  || '1497976137345667173'
 const BACKEND     = process.env.BACKEND_URL || 'https://trackerservice-production.up.railway.app'
 const TRACKER_URL = 'https://sd-tracker.vercel.app'
 
+// ── Channel name config ───────────────────────────────────────────────────────
+// Logistics channels (one command per channel)
+const CH_ARRIVAL = 'arrival'         // only /arrival allowed here
+const CH_COUNT   = 'count_repack'    // only /count allowed here
+const CH_READY   = 'ready_to_ingest' // only ingestion lead /assign allowed here
+
+// Per-ingestion-person channels: any channel whose name starts with this
+// prefix is treated as an ingestion person's private workspace.
+// e.g. #ingest-aslam, #ingest-naresh, #ingest-kiran
+const INGEST_PREFIX = 'ingest-'
+
+// Comma-separated Discord user IDs of ingestion leads. When set, /assign
+// and the /list view inside #ready_to_ingest are restricted to these users.
+// Leave unset to disable the check (useful while testing).
+const INGESTION_LEAD_IDS = (process.env.INGESTION_LEAD_IDS || '')
+  .split(',').map(s => s.trim()).filter(Boolean)
+
+function isIngestionLead(userId) {
+  if (!INGESTION_LEAD_IDS.length) return true // no gate configured → allow all
+  return INGESTION_LEAD_IDS.includes(userId)
+}
+
+// If the channel name is `ingest-aslam`, return "aslam". Otherwise null.
+function ingestPersonFromChannel(channelName) {
+  if (!channelName || !channelName.toLowerCase().startsWith(INGEST_PREFIX)) return null
+  const name = channelName.slice(INGEST_PREFIX.length).trim()
+  return name || null
+}
+
 // ── API helper ────────────────────────────────────────────────────────────────
 async function api(path, opts = {}) {
   const res  = await fetch(`${BACKEND}${path}`, {
@@ -58,20 +87,28 @@ function parseKV(lines) {
   return out
 }
 
-// ── Slash command definitions — read-only only ────────────────────────────────
+// Accepts either "42" or "packet:42" after a command name
+function extractPacketId(first, commandName) {
+  const re = new RegExp(`^/${commandName}\\s+(?:packet\\s*:\\s*)?(\\d+)`, 'i')
+  const m = first.match(re)
+  return m ? Number(m[1]) : null
+}
+
+function packetSummaryLine(p) {
+  let entries = []
+  try { entries = JSON.parse(p.factory_entries || '[]') } catch {}
+  const factoryInfo = entries.length
+    ? entries.map(e => `${e.factory_name}: ${e.count || 0}`).join(', ')
+    : `${p.sd_card_count || 0} cards`
+  const pkgs  = p.num_packages ? ` · 📦 ${p.num_packages} pkg` : ''
+  const asgn  = p.assigned_to ? ` · 👤 ${p.assigned_to}` : ''
+  return `**#${p.id}** · **${p.team_name}** · ${factoryInfo}${pkgs}${asgn}`
+}
+
+// ── Slash command definitions ─────────────────────────────────────────────────
 const COMMANDS = [
-  {
-    name: 'list',
-    description: '📋 List all packets pending Count & Repack',
-  },
-  {
-    name: 'ready',
-    description: '🚀 Show all packets ready to ingest',
-  },
-  {
-    name: 'help',
-    description: '📖 Show the message template for this channel',
-  },
+  { name: 'list', description: '📋 List packets relevant to this channel' },
+  { name: 'help', description: '📖 Show the message template for this channel' },
 ]
 
 async function registerCommands(client) {
@@ -101,12 +138,20 @@ client.once(Events.ClientReady, async (c) => {
   await registerCommands(c)
 })
 
-// ── Slash command handler — /list and /ready ──────────────────────────────────
-client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand()) return
+// ══════════════════════════════════════════════════════════════════════════════
+// /list — channel-aware
+//   #count_repack      → packets pending count & repack (received_at_hq)
+//   #ready_to_ingest   → packets ready to assign (counted_and_repacked)
+//                        restricted to ingestion leads
+//   #ingest-<name>     → packets assigned to <name>
+//                        (collected_for_ingestion + ingestion_started)
+// ══════════════════════════════════════════════════════════════════════════════
+async function handleListCommand(interaction) {
+  const chName  = interaction.channel?.name || ''
+  const chLower = chName.toLowerCase()
 
-  // ── /list ─────────────────────────────────────────────────────────────────
-  if (interaction.commandName === 'list') {
+  // ── #count_repack ───────────────────────────────────────────────────────────
+  if (chLower === CH_COUNT) {
     await interaction.deferReply()
     try {
       const packets = await api('/api/packets?status=received_at_hq')
@@ -119,7 +164,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       ).join('\n')
       await interaction.editReply(
         `📋 **Packets Pending Count & Repack** (${packets.length})\n\n${lines}\n\n` +
-        `▶️ Send a message starting with \`/count 42\` to count a packet`
+        `▶️ Send \`/count 42\` + factory lines to count a packet`
       )
     } catch (err) {
       await interaction.editReply(`❌ ${err.message}`)
@@ -127,92 +172,160 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return
   }
 
-  // ── /help ─────────────────────────────────────────────────────────────────
-  if (interaction.commandName === 'help') {
-    const ch = interaction.channel.name
-
-    if (ch === CH_ARRIVAL) {
-      await interaction.reply(
-        `**📦 #arrival — Log a new SD card packet**\n\n` +
-        `Send a message in this format:\n` +
-        `\`\`\`\n/arrival\nTeam: Dukaan\nReceived by: Naresh\nPhone: 9876543210\nDate: 2026-04-26\n\`\`\`` +
-        `\n\n_Phone and Date are optional. Attach photos to the same message._`
-      )
+  // ── #ready_to_ingest (ingestion lead only) ──────────────────────────────────
+  if (chLower === CH_READY) {
+    if (!isIngestionLead(interaction.user.id)) {
+      await interaction.reply({
+        content: `❌ Only ingestion leads can use \`/list\` here.`,
+        ephemeral: true,
+      })
       return
     }
-
-    if (ch === CH_COUNT) {
-      await interaction.reply(
-        `**✅ #count_repack — Count & Repack a packet**\n\n` +
-        `First use \`/list\` to get the packet ID, then send:\n` +
-        `\`\`\`\n/count 42\nFactory Name,YYYY-MM-DD,SD Count,Missing,Packages\nFactory Name,YYYY-MM-DD,SD Count,Missing,Packages\nCounted by: Naresh\nNotes: optional\n\`\`\`` +
-        `\n\n**Example:**\n` +
-        `\`\`\`\n/count 42\nDyna Fashion,2026-04-25,192,3,2\nAttire,2026-04-25,37,0,1\nCounted by: Naresh\nNotes: Good condition\n\`\`\`` +
-        `\n\n_Add as many factory lines as needed. Attach photos to the same message._`
+    await interaction.deferReply()
+    try {
+      const packets = await api('/api/packets?status=counted_and_repacked&repack_photos=1')
+      if (!packets.length) {
+        await interaction.editReply('✅ No packets ready to assign.')
+        return
+      }
+      const lines = packets.map(packetSummaryLine).join('\n')
+      await interaction.editReply(
+        `🚀 **Packets Ready to Assign** (${packets.length})\n\n${lines}\n\n` +
+        `▶️ Assign with:\n\`\`\`\n/assign 42\nTeam: Dukaan\nCount: 192\nAssign to: Aslam\nDate: ${today()}\n\`\`\``
       )
-      return
+    } catch (err) {
+      await interaction.editReply(`❌ ${err.message}`)
     }
+    return
+  }
 
-    if (ch === CH_COLLECT) {
-      await interaction.reply(
-        `**📤 #ready_to_ingest — Collect a packet for ingestion**\n\n` +
-        `First use \`/ready\` to get the packet ID, then send:\n` +
-        `\`\`\`\n/collect 42\nAssigned to: Aslam\nCollected by: Naresh\n\`\`\``
+  // ── #ingest-<name> (per-ingestion-person queue) ─────────────────────────────
+  const person = ingestPersonFromChannel(chLower)
+  if (person) {
+    await interaction.deferReply()
+    try {
+      const packets = await api(
+        `/api/packets?assigned_to=${encodeURIComponent(person)}` +
+        `&statuses=collected_for_ingestion,ingestion_started`
       )
-      return
+      if (!packets.length) {
+        await interaction.editReply(`✅ No packets currently assigned to **${person}**.`)
+        return
+      }
+      const lines = packets.map(p => {
+        const badge = p.status === 'ingestion_started' ? '⏳ in progress'
+                    : '📦 assigned'
+        return `**#${p.id}** · **${p.team_name}** · ${p.sd_card_count || 0} cards · ${badge}`
+      }).join('\n')
+      await interaction.editReply(
+        `📋 **Packets assigned to ${person}** (${packets.length})\n\n${lines}\n\n` +
+        `▶️ Start with \`/start 42\` + details\n` +
+        `▶️ Finish with \`/complete 42\` + counts`
+      )
+    } catch (err) {
+      await interaction.editReply(`❌ ${err.message}`)
     }
+    return
+  }
 
-    // Generic help for any other channel
+  // ── Any other channel — show a hint ─────────────────────────────────────────
+  await interaction.reply({
+    content:
+      `ℹ️ \`/list\` needs to be used in one of:\n` +
+      `• **#${CH_COUNT}** — packets pending count\n` +
+      `• **#${CH_READY}** — packets ready to assign (ingestion lead)\n` +
+      `• **#${INGEST_PREFIX}<your-name>** — packets assigned to you`,
+    ephemeral: true,
+  })
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// /help — channel-aware template display
+// ══════════════════════════════════════════════════════════════════════════════
+async function handleHelpCommand(interaction) {
+  const ch = (interaction.channel?.name || '').toLowerCase()
+
+  if (ch === CH_ARRIVAL) {
     await interaction.reply(
-      `**📖 SD Tracker Bot — Commands**\n\n` +
-      `**#arrival** → type \`/arrival\` + template\n` +
-      `**#count_repack** → type \`/count <id>\` + factory lines\n` +
-      `**#ready_to_ingest** → type \`/collect <id>\` + template\n\n` +
-      `**Slash commands:**\n` +
-      `\`/list\` — packets pending count & repack\n` +
-      `\`/ready\` — packets ready to ingest\n` +
-      `\`/help\` — show template for this channel`
+      `**📦 #arrival — Log a new SD card packet**\n\n` +
+      `Send a message in this format:\n` +
+      `\`\`\`\n/arrival\nTeam: Dukaan\nReceived by: Naresh\nPhone: 9876543210\nDate: ${today()}\n\`\`\`` +
+      `\n\n_Phone and Date are optional. Attach photos to the same message._`
     )
     return
   }
 
-  // ── /ready ────────────────────────────────────────────────────────────────
-  if (interaction.commandName === 'ready') {
-    await interaction.deferReply()
-    try {
-      const packets = await api('/api/packets?status=counted_and_repacked')
-      if (!packets.length) {
-        await interaction.editReply('✅ No packets ready to ingest yet.')
-        return
-      }
-      const lines = packets.map(p => {
-        let entries = []
-        try { entries = JSON.parse(p.factory_entries || '[]') } catch {}
-        const info = entries.length
-          ? entries.map(e => `${e.factory_name}: ${e.count} cards${e.missing > 0 ? ` (⚠️ ${e.missing} missing)` : ''}`).join(', ')
-          : `${p.sd_card_count} cards`
-        return `**#${p.id}** · **${p.team_name}** · ${info} · 📦 ${p.num_packages || 1} pkg`
-      }).join('\n')
-      await interaction.editReply(
-        `🚀 **Packets Ready to Ingest** (${packets.length})\n\n${lines}\n\n` +
-        `▶️ Send \`/collect 42\` to collect a packet`
-      )
-    } catch (err) {
-      await interaction.editReply(`❌ ${err.message}`)
-    }
+  if (ch === CH_COUNT) {
+    await interaction.reply(
+      `**✅ #count_repack — Count & Repack a packet**\n\n` +
+      `First use \`/list\` to get the packet ID, then send:\n` +
+      `\`\`\`\n/count 42\nFactory Name,YYYY-MM-DD,SD Count,Missing,Packages\nCounted by: Naresh\nNotes: optional\n\`\`\`` +
+      `\n\n**Example:**\n` +
+      `\`\`\`\n/count 42\nDyna Fashion,2026-04-25,192,3,2\nAttire,2026-04-25,37,0,1\nCounted by: Naresh\n\`\`\`` +
+      `\n\n_Add as many factory lines as needed. Attach photos to the same message._`
+    )
     return
+  }
+
+  if (ch === CH_READY) {
+    await interaction.reply(
+      `**🚀 #ready_to_ingest — Assign a packet (ingestion lead only)**\n\n` +
+      `First use \`/list\` to see packets awaiting assignment, then send:\n` +
+      `\`\`\`\n/assign 42\nTeam: Dukaan\nCount: 192\nAssign to: Aslam\nDate: ${today()}\n\`\`\`` +
+      `\n\n_The assignee will see the packet in their own **#${INGEST_PREFIX}<name>** channel._`
+    )
+    return
+  }
+
+  const person = ingestPersonFromChannel(ch)
+  if (person) {
+    await interaction.reply(
+      `**🎯 #${INGEST_PREFIX}${person} — Your ingestion queue**\n\n` +
+      `\`/list\` — show packets assigned to you\n\n` +
+      `**When you start a packet:**\n` +
+      `\`\`\`\n/start 42\nTeam: Dukaan\nDeployment date: ${today()}\nFactory: Dyna Fashion\nCount: 192\nDate: ${today()}\n\`\`\`` +
+      `\n\n**When you finish a packet:**\n` +
+      `\`\`\`\n/complete 42\nDeployment date: ${today()}\nTeam: Dukaan\nFactory: Dyna Fashion\nCount: 190\nMissing: 2\nExtra: 0\nRed: 1\n\`\`\`` +
+      `\n\n_Attach photos to the same message — they'll be saved against the packet._`
+    )
+    return
+  }
+
+  // Generic fallback
+  await interaction.reply(
+    `**📖 SD Tracker Bot — Channel Guide**\n\n` +
+    `**#${CH_ARRIVAL}** → \`/arrival\` + team/received by/phone/date\n` +
+    `**#${CH_COUNT}** → \`/count <id>\` + factory lines\n` +
+    `**#${CH_READY}** → \`/assign <id>\` + team/count/assign to/date _(lead only)_\n` +
+    `**#${INGEST_PREFIX}<name>** → \`/start <id>\` and \`/complete <id>\`\n\n` +
+    `**Slash commands:**\n` +
+    `\`/list\` — channel-aware list\n` +
+    `\`/help\` — show this channel's template`
+  )
+}
+
+// ── Slash command dispatcher ──────────────────────────────────────────────────
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return
+  try {
+    if (interaction.commandName === 'list') return handleListCommand(interaction)
+    if (interaction.commandName === 'help') return handleHelpCommand(interaction)
+  } catch (err) {
+    console.error(`Slash /${interaction.commandName} failed:`, err)
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply(`❌ ${err.message}`)
+    } else {
+      await interaction.reply({ content: `❌ ${err.message}`, ephemeral: true })
+    }
   }
 })
 
-// ── Channel name config ───────────────────────────────────────────────────────
-const CH_ARRIVAL  = 'arrival'         // only /arrival allowed here
-const CH_COUNT    = 'count_repack'    // only /count allowed here
-const CH_COLLECT  = 'ready_to_ingest' // only /collect allowed here
-
-// ── Message command handler ───────────────────────────────────────────────────
-// Handles: /arrival, /count <id>, /collect <id>
+// ══════════════════════════════════════════════════════════════════════════════
+// Message command handler
+// Handles: /arrival, /count <id>, /assign <id>, /start <id>, /complete <id>
 // Photos can be attached to the SAME message — no need to reply separately.
 // Also handles reply-with-photos as a fallback (photoPending map).
+// ══════════════════════════════════════════════════════════════════════════════
 const photoPending = new Map() // replyMsgId → { packetId, type }
 
 client.on(Events.MessageCreate, async (msg) => {
@@ -222,10 +335,11 @@ client.on(Events.MessageCreate, async (msg) => {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
   if (!lines.length) return
 
-  const first = lines[0]
+  const first  = lines[0]
+  const chName = (msg.channel?.name || '').toLowerCase()
 
   // ══════════════════════════════════════════════════════════════════════════
-  // /arrival
+  // /arrival — #arrival channel
   // Template:
   //   /arrival
   //   Team: Dukaan
@@ -234,7 +348,7 @@ client.on(Events.MessageCreate, async (msg) => {
   //   Date: 2026-04-25         (optional, defaults to today)
   // ══════════════════════════════════════════════════════════════════════════
   if (first.toLowerCase() === '/arrival') {
-    if (msg.channel.name !== CH_ARRIVAL) {
+    if (chName !== CH_ARRIVAL) {
       await msg.reply(`❌ Use \`/arrival\` only in the **#${CH_ARRIVAL}** channel.`)
       return
     }
@@ -245,7 +359,6 @@ client.on(Events.MessageCreate, async (msg) => {
     const date_raw    = kv['date'] || kv['received_date'] || kv['date_received'] || ''
     const date        = date_raw || today()
 
-    // Detailed field-by-field validation
     const arrivalErrors = []
     if (!team_name)   arrivalErrors.push(`• **Team** is missing — add a line: \`Team: Dukaan\``)
     if (!received_by) arrivalErrors.push(`• **Received by** is missing — add a line: \`Received by: Naresh\``)
@@ -253,13 +366,12 @@ client.on(Events.MessageCreate, async (msg) => {
     if (arrivalErrors.length) {
       await msg.reply(
         `❌ **Fix these issues and try again:**\n${arrivalErrors.join('\n')}\n\n` +
-        `**Full format:**\n\`\`\`\n/arrival\nTeam: Dukaan\nReceived by: Naresh\nPhone: 9876543210\nDate: 2026-04-26\n\`\`\`\n_(Phone and Date are optional)_`
+        `**Full format:**\n\`\`\`\n/arrival\nTeam: Dukaan\nReceived by: Naresh\nPhone: 9876543210\nDate: ${today()}\n\`\`\`\n_(Phone and Date are optional)_`
       )
       return
     }
 
     try {
-      // Download attached photos immediately (if any)
       const photos = await extractPhotos(msg)
 
       const packet = await api('/api/packets', {
@@ -283,7 +395,7 @@ client.on(Events.MessageCreate, async (msg) => {
         (phone ? ` · 📱 ${phone}` : '') +
         ` · 📅 ${fmtDate(date)}\n\n` +
         photoNote + `\n\n` +
-        `▶️ Use \`/list\` to see all pending packets`
+        `▶️ It'll show up in \`/list\` inside **#${CH_COUNT}**`
       )
 
       if (!photos.length) {
@@ -297,22 +409,21 @@ client.on(Events.MessageCreate, async (msg) => {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // /count <id>
+  // /count <id> — #count_repack channel
   // Template:
   //   /count 42
-  //   Dyna Fashion | 2026-04-25 | 192 | 3 | 2
-  //   Attire       | 2026-04-25 | 37  | 0 | 1
-  //   (any number of factory lines...)
+  //   Factory Name,YYYY-MM-DD,SD Count,Missing,Packages
+  //   Factory Name,YYYY-MM-DD,SD Count,Missing,Packages
   //   Counted by: Naresh
   //   Notes: optional condition notes
   // ══════════════════════════════════════════════════════════════════════════
-  const countMatch = first.match(/^\/count\s+(\d+)/i)
-  if (countMatch) {
-    if (msg.channel.name !== CH_COUNT) {
+  const countId = extractPacketId(first, 'count')
+  if (countId !== null) {
+    if (chName !== CH_COUNT) {
       await msg.reply(`❌ Use \`/count\` only in the **#${CH_COUNT}** channel.`)
       return
     }
-    const packetId       = Number(countMatch[1])
+    const packetId        = countId
     const factory_entries = []
     const parseErrors     = []
     let counted_by        = ''
@@ -331,17 +442,16 @@ client.on(Events.MessageCreate, async (msg) => {
       }
       if (!line.includes(',')) continue // skip non-factory lines
 
-      const parts          = line.split(',').map(s => s.trim())
+      const parts        = line.split(',').map(s => s.trim())
       const [factory_name, deployment_date, rawSd, rawMissing, rawPkg] = parts
-      const count          = Number(rawSd)      || 0
-      const missing        = Number(rawMissing) || 0
-      const num_packages   = Number(rawPkg)     || 1
+      const count        = Number(rawSd)      || 0
+      const missing      = Number(rawMissing) || 0
+      const num_packages = Number(rawPkg)     || 1
 
-      // Detailed per-line validation
       const lineErrors = []
       if (!factory_name)                              lineErrors.push('factory name is empty')
       if (!deployment_date)                           lineErrors.push('date is missing')
-      else if (!/^\d{4}-\d{2}-\d{2}$/.test(deployment_date)) lineErrors.push(`date \`${deployment_date}\` is invalid — use YYYY-MM-DD (e.g. 2026-04-25)`)
+      else if (!/^\d{4}-\d{2}-\d{2}$/.test(deployment_date)) lineErrors.push(`date \`${deployment_date}\` is invalid — use YYYY-MM-DD`)
       if (!rawSd || isNaN(Number(rawSd)))             lineErrors.push(`SD count \`${rawSd || '(empty)'}\` is not a number`)
       else if (count <= 0)                            lineErrors.push('SD count must be greater than 0')
       if (rawMissing && isNaN(Number(rawMissing)))    lineErrors.push(`missing count \`${rawMissing}\` is not a number`)
@@ -375,7 +485,6 @@ client.on(Events.MessageCreate, async (msg) => {
     const total_pkgs = factory_entries.reduce((s, f) => s + f.num_packages, 0)
 
     try {
-      // Download attached photos immediately (if any)
       const photos = await extractPhotos(msg)
 
       await api(`/api/packets/${packetId}/events`, {
@@ -411,7 +520,8 @@ client.on(Events.MessageCreate, async (msg) => {
         `${factoryLines}\n\n` +
         `**Total:** 💾 ${total_sd} SD cards · 📦 ${total_pkgs} pkg` +
         warnBlock + `\n\n` +
-        photoNote
+        photoNote + `\n\n` +
+        `▶️ Ingestion lead can now \`/assign\` it inside **#${CH_READY}**`
       )
 
       if (!photos.length) {
@@ -425,47 +535,250 @@ client.on(Events.MessageCreate, async (msg) => {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // /collect <id>
+  // /assign <id> — #ready_to_ingest channel (ingestion lead only)
   // Template:
-  //   /collect 42
-  //   Assigned to: Aslam
-  //   Collected by: Naresh
+  //   /assign 42
+  //   Team: Dukaan
+  //   Count: 192
+  //   Assign to: Aslam
+  //   Date: 2026-04-26
   // ══════════════════════════════════════════════════════════════════════════
-  const collectMatch = first.match(/^\/collect\s+(\d+)/i)
-  if (collectMatch) {
-    if (msg.channel.name !== CH_COLLECT) {
-      await msg.reply(`❌ Use \`/collect\` only in the **#${CH_COLLECT}** channel.`)
+  const assignId = extractPacketId(first, 'assign')
+  if (assignId !== null) {
+    if (chName !== CH_READY) {
+      await msg.reply(`❌ Use \`/assign\` only in the **#${CH_READY}** channel.`)
       return
     }
-    const packetId   = Number(collectMatch[1])
-    const kv         = parseKV(lines.slice(1))
-    const assigned_to  = kv['assigned_to']  || kv['assigned to']  || kv['assign_to'] || kv['assign to']
-    const collected_by = kv['collected_by'] || kv['collected by'] || kv['by']
+    if (!isIngestionLead(msg.author.id)) {
+      await msg.reply(`❌ Only ingestion leads can assign packets.`)
+      return
+    }
 
-    const collectErrors = []
-    if (!assigned_to)  collectErrors.push(`• **Assigned to** is missing — add: \`Assigned to: Aslam\``)
-    if (!collected_by) collectErrors.push(`• **Collected by** is missing — add: \`Collected by: Naresh\``)
+    const packetId    = assignId
+    const kv          = parseKV(lines.slice(1))
+    const team_name   = kv['team']        || kv['team_name']
+    const count       = kv['count']       || kv['sd_count'] || kv['sd_card_count']
+    const assign_to   = kv['assign_to']   || kv['assign to'] || kv['assignee'] || kv['to']
+    const date_raw    = kv['date']        || kv['assigned_date'] || kv['assign_date'] || ''
+    const date        = date_raw || today()
 
-    if (collectErrors.length) {
+    const assignErrors = []
+    if (!team_name) assignErrors.push(`• **Team** is missing — add: \`Team: Dukaan\``)
+    if (!assign_to) assignErrors.push(`• **Assign to** is missing — add: \`Assign to: Aslam\``)
+
+    if (assignErrors.length) {
       await msg.reply(
-        `❌ **Fix these issues and try again:**\n${collectErrors.join('\n')}\n\n` +
-        `**Full format:**\n\`\`\`\n/collect 42\nAssigned to: Aslam\nCollected by: Naresh\n\`\`\``
+        `❌ **Fix these issues and try again:**\n${assignErrors.join('\n')}\n\n` +
+        `**Full format:**\n\`\`\`\n/assign 42\nTeam: Dukaan\nCount: 192\nAssign to: Aslam\nDate: ${today()}\n\`\`\``
       )
       return
     }
 
     try {
+      const photos = await extractPhotos(msg)
+
       await api(`/api/packets/${packetId}/events`, {
         method: 'POST',
         body: JSON.stringify({
           event_type: 'collected_for_ingestion',
-          event_data: { collected_by, assigned_to },
+          event_data: {
+            assigned_to:  assign_to,
+            assigned_by:  msg.author.username || 'Ingestion Lead',
+            team_name:    team_name || null,
+            sd_card_count: count ? Number(count) : null,
+            assigned_date: date,
+            photos:       photos.length ? photos : undefined,
+          },
         }),
       })
 
+      const countNote = count ? ` · 💾 ${count} cards` : ''
+      const photoNote = photos.length ? `\n📸 ${photos.length} photo(s) attached.` : ''
+
       await msg.reply(
-        `✅ **Packet #${packetId} collected!**\n` +
-        `👤 Collected by **${collected_by}** · Assigned to **${assigned_to}**\n\n` +
+        `✅ **Packet #${packetId} assigned!**\n` +
+        `📦 **${team_name}**${countNote} · 👤 **${assign_to}** · 📅 ${fmtDate(date)}${photoNote}\n\n` +
+        `▶️ **${assign_to}** — check \`/list\` inside your **#${INGEST_PREFIX}${assign_to.toLowerCase().split(/\s+/)[0]}** channel.`
+      )
+    } catch (err) {
+      await msg.reply(`❌ Failed: ${err.message}`)
+    }
+    return
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // /start <id> — #ingest-<name> channel
+  // Template:
+  //   /start 42
+  //   Team: Dukaan
+  //   Deployment date: 2026-04-26
+  //   Factory: Dyna Fashion
+  //   Count: 192
+  //   Date: 2026-04-26
+  // ══════════════════════════════════════════════════════════════════════════
+  const startId = extractPacketId(first, 'start')
+  if (startId !== null) {
+    const person = ingestPersonFromChannel(chName)
+    if (!person) {
+      await msg.reply(`❌ Use \`/start\` only inside your personal **#${INGEST_PREFIX}<name>** channel.`)
+      return
+    }
+    const packetId        = startId
+    const kv              = parseKV(lines.slice(1))
+    const team_name       = kv['team']             || kv['team_name']
+    const deployment_date = kv['deployment_date']  || kv['deployment date'] || kv['deploy_date'] || ''
+    const factory_name    = kv['factory']          || kv['factory_name']
+    const count           = kv['count']            || kv['sd_count']        || kv['sd_card_count']
+    const date_raw        = kv['date']             || kv['start_date']      || ''
+    const date            = date_raw || today()
+
+    const startErrors = []
+    if (!team_name)       startErrors.push(`• **Team** is missing — add: \`Team: Dukaan\``)
+    if (!factory_name)    startErrors.push(`• **Factory** is missing — add: \`Factory: Dyna Fashion\``)
+    if (!deployment_date) startErrors.push(`• **Deployment date** is missing — add: \`Deployment date: ${today()}\``)
+
+    if (startErrors.length) {
+      await msg.reply(
+        `❌ **Fix these issues and try again:**\n${startErrors.join('\n')}\n\n` +
+        `**Full format:**\n\`\`\`\n/start 42\nTeam: Dukaan\nDeployment date: ${today()}\nFactory: Dyna Fashion\nCount: 192\nDate: ${today()}\n\`\`\``
+      )
+      return
+    }
+
+    try {
+      const photos = await extractPhotos(msg)
+
+      await api(`/api/packets/${packetId}/events`, {
+        method: 'POST',
+        body: JSON.stringify({
+          event_type: 'ingestion_started',
+          event_data: {
+            started_by:      person,
+            team_name,
+            factory_name,
+            deployment_date,
+            sd_card_count:   count ? Number(count) : null,
+            started_date:    date,
+            photos:          photos.length ? photos : undefined,
+          },
+        }),
+      })
+
+      const countNote = count ? ` · 💾 ${count} cards` : ''
+      const photoNote = photos.length ? `\n📸 ${photos.length} photo(s) attached.` : ''
+
+      await msg.reply(
+        `⏳ **Packet #${packetId} ingestion started!**\n` +
+        `👤 ${person} · 📦 **${team_name}** · 🏭 ${factory_name}${countNote} · 📅 deploy ${fmtDate(deployment_date)}${photoNote}\n\n` +
+        `▶️ When you're done, send \`/complete ${packetId}\` with the final counts.`
+      )
+    } catch (err) {
+      await msg.reply(`❌ Failed: ${err.message}`)
+    }
+    return
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // /complete <id> — #ingest-<name> channel
+  // Template:
+  //   /complete 42
+  //   Deployment date: 2026-04-26
+  //   Team: Dukaan
+  //   Factory: Dyna Fashion
+  //   Count: 190
+  //   Missing: 2
+  //   Extra: 0
+  //   Red: 1
+  // ══════════════════════════════════════════════════════════════════════════
+  const completeId = extractPacketId(first, 'complete')
+  if (completeId !== null) {
+    const person = ingestPersonFromChannel(chName)
+    if (!person) {
+      await msg.reply(`❌ Use \`/complete\` only inside your personal **#${INGEST_PREFIX}<name>** channel.`)
+      return
+    }
+    const packetId        = completeId
+    const kv              = parseKV(lines.slice(1))
+    const deployment_date = kv['deployment_date']  || kv['deployment date'] || kv['deploy_date'] || ''
+    const team_name       = kv['team']             || kv['team_name']
+    const factory_name    = kv['factory']          || kv['factory_name']    || kv['industry']
+    const rawCount        = kv['count']            || kv['actual_count']    || kv['sd_count']   || '0'
+    const rawMissing      = kv['missing']          || kv['missing_count']   || '0'
+    const rawExtra        = kv['extra']            || kv['extra_count']     || '0'
+    const rawRed          = kv['red']              || kv['red_cards']       || kv['red_count']  || '0'
+
+    const errors = []
+    if (!team_name)       errors.push(`• **Team** is missing — add: \`Team: Dukaan\``)
+    if (!deployment_date) errors.push(`• **Deployment date** is missing — add: \`Deployment date: ${today()}\``)
+    if (!factory_name)    errors.push(`• **Factory** is missing — add: \`Factory: Dyna Fashion\``)
+    if (isNaN(Number(rawCount)))   errors.push(`• **Count** \`${rawCount}\` is not a number`)
+    if (isNaN(Number(rawMissing))) errors.push(`• **Missing** \`${rawMissing}\` is not a number`)
+    if (isNaN(Number(rawExtra)))   errors.push(`• **Extra** \`${rawExtra}\` is not a number`)
+    if (isNaN(Number(rawRed)))     errors.push(`• **Red** \`${rawRed}\` is not a number`)
+
+    if (errors.length) {
+      await msg.reply(
+        `❌ **Fix these issues and try again:**\n${errors.join('\n')}\n\n` +
+        `**Full format:**\n\`\`\`\n/complete 42\nDeployment date: ${today()}\nTeam: Dukaan\nFactory: Dyna Fashion\nCount: 190\nMissing: 2\nExtra: 0\nRed: 1\n\`\`\``
+      )
+      return
+    }
+
+    try {
+      const photos = await extractPhotos(msg)
+
+      // Attach photos by updating repack_photo_urls on the packet first
+      // (if any new ones are provided) so they surface in the UI.
+      if (photos.length) {
+        await api(`/api/packets/${packetId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            action: 'update_photos',
+            repack_photo_urls: JSON.stringify(photos),
+          }),
+        }).catch(err => console.warn(`update_photos for #${packetId} failed: ${err.message}`))
+      }
+
+      await api(`/api/packets/${packetId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          action:          'complete',
+          team_name,
+          industry:        factory_name,
+          actual_count:    Number(rawCount),
+          missing_count:   Number(rawMissing),
+          extra_count:     Number(rawExtra),
+          red_cards_count: Number(rawRed),
+          ingested_by:     person,
+          deployment_date,
+        }),
+      })
+
+      // Also log an event row so the Activity Log picks it up
+      await api(`/api/packets/${packetId}/events`, {
+        method: 'POST',
+        body: JSON.stringify({
+          event_type: 'ingestion_completed',
+          event_data: {
+            ingested_by:     person,
+            team_name,
+            factory_name,
+            actual_count:    Number(rawCount),
+            missing_count:   Number(rawMissing),
+            extra_count:     Number(rawExtra),
+            red_cards_count: Number(rawRed),
+            deployment_date,
+          },
+        }),
+      }).catch(err => console.warn(`event log for completion #${packetId} failed: ${err.message}`))
+
+      const photoNote = photos.length ? `\n📸 ${photos.length} photo(s) attached.` : ''
+
+      await msg.reply(
+        `✅ **Packet #${packetId} ingestion complete!**\n` +
+        `👤 ${person} · 📦 **${team_name}** · 🏭 ${factory_name}\n` +
+        `💾 ${rawCount} actual · ⚠️ ${rawMissing} missing · ➕ ${rawExtra} extra · 🔴 ${rawRed} red\n` +
+        `📅 Deployed ${fmtDate(deployment_date)}${photoNote}\n\n` +
         `🔗 ${TRACKER_URL}`
       )
     } catch (err) {
