@@ -35,11 +35,55 @@ function isIngestionLead(userId) {
   return INGESTION_LEAD_IDS.includes(userId)
 }
 
+// ── Ingestion roster (code → canonical name) ──────────────────────────────────
+// Lets the lead type a 3-digit code (001 / 002 / …) in /assign instead of the
+// person's full name — avoids typos. The DB still stores the canonical name
+// (e.g. "Aslam"), not the code. Codes are conventionally zero-padded to 3
+// digits in alphabetical order of the roster, but any stable mapping works.
+//
+// Configure via env var:
+//   INGESTION_ROSTER=001:Aslam,002:Bhavin,003:Chandan,004:Divya,005:Emilia,006:Farhan
+// Leave unset and the bot just passes names through unchanged.
+const INGESTION_ROSTER = (() => {
+  const raw = (process.env.INGESTION_ROSTER || '').trim()
+  const byKey    = new Map() // lowercased code OR name → canonical name
+  const byName   = new Map() // lowercased canonical name → code
+  const entries  = []
+  raw.split(',').map(s => s.trim()).filter(Boolean).forEach(pair => {
+    const [code, name] = pair.split(':').map(s => (s || '').trim())
+    if (!code || !name) return
+    byKey.set(code.toLowerCase(), name)
+    byKey.set(name.toLowerCase(), name)
+    byName.set(name.toLowerCase(), code)
+    entries.push({ code, name })
+  })
+  return { byKey, byName, entries }
+})()
+
+// Resolve whatever the user typed ("001", "aslam", "Aslam", etc.) to the
+// canonical roster name. Unknown inputs are returned trimmed, unchanged.
+function resolveAssignee(input) {
+  if (!input) return input
+  const cleaned = String(input).trim()
+  return INGESTION_ROSTER.byKey.get(cleaned.toLowerCase()) || cleaned
+}
+
+// Is `input` a recognised roster key (code or name)?
+function isRosterKey(input) {
+  if (!input) return false
+  return INGESTION_ROSTER.byKey.has(String(input).trim().toLowerCase())
+}
+
 // If the channel name is `ingest-aslam`, return "aslam". Otherwise null.
+// Also accepts code-named channels like `ingest-001` (resolved via roster).
 function ingestPersonFromChannel(channelName) {
   if (!channelName || !channelName.toLowerCase().startsWith(INGEST_PREFIX)) return null
-  const name = channelName.slice(INGEST_PREFIX.length).trim()
-  return name || null
+  const raw = channelName.slice(INGEST_PREFIX.length).trim()
+  if (!raw) return null
+  // If the suffix is a roster code, return the canonical name lowercased so
+  // LOWER(assigned_to) matching on the backend still works.
+  const canonical = INGESTION_ROSTER.byKey.get(raw.toLowerCase())
+  return (canonical || raw).toLowerCase()
 }
 
 // ── API helper ────────────────────────────────────────────────────────────────
@@ -250,9 +294,9 @@ async function handleListCommand(interaction) {
   if (person) {
     try {
       // Show active packets (assigned + in progress) AND any `completed`
-      // packets that still have remaining factories to ingest. The last
-      // case exists because a multi-factory packet only leaves the
-      // "completed" status once every factory has an ingestion record.
+      // packets that still have remaining factories to ingest. Completed
+      // packets whose factories are ALL already ingested are filtered out
+      // further below so they never clutter this view.
       const packets = await api(
         `/api/packets?assigned_to=${encodeURIComponent(person)}` +
         `&statuses=collected_for_ingestion,ingestion_started,completed`
@@ -273,43 +317,71 @@ async function handleListCommand(interaction) {
         })
       )
 
+      const norm = s => String(s || '').trim().toLowerCase()
       const sections = []
+
       for (const { packet: p, detail } of details) {
-        let factoryList = []
-        try { factoryList = JSON.parse(p.factory_entries || '[]') } catch {}
+        let rawList = []
+        try { rawList = JSON.parse(p.factory_entries || '[]') } catch {}
+
+        // De-duplicate factory entries by normalised factory_name.
+        // The data sometimes has the same factory listed twice (usually
+        // a /count typo) which used to make completion math misleading.
+        // Keep the first occurrence, merge counts/packages for the rest.
+        const seen = new Map() // normName → merged entry
+        for (const f of Array.isArray(rawList) ? rawList : []) {
+          const key = norm(f.factory_name)
+          if (!key) continue
+          const existing = seen.get(key)
+          if (!existing) {
+            seen.set(key, { ...f })
+          } else {
+            existing.count        = (Number(existing.count)        || 0) + (Number(f.count)        || 0)
+            existing.missing      = (Number(existing.missing)      || 0) + (Number(f.missing)      || 0)
+            existing.num_packages = (Number(existing.num_packages) || 0) + (Number(f.num_packages) || 0)
+            if (!existing.deployment_date && f.deployment_date) existing.deployment_date = f.deployment_date
+          }
+        }
+        const factoryList = Array.from(seen.values())
 
         const records = Array.isArray(detail?.ingestion_records)
           ? detail.ingestion_records
-          : detail?.ingestion
-            ? [detail.ingestion]
-            : []
-
-        const norm = s => String(s || '').trim().toLowerCase()
+          : detail?.ingestion ? [detail.ingestion] : []
         const doneSet = new Set(records.map(r => norm(r.industry)))
-        const total = factoryList.length || 1
-        const done  = factoryList.length
+
+        const total     = factoryList.length || 1
+        const done      = factoryList.length
           ? factoryList.filter(f => doneSet.has(norm(f.factory_name))).length
           : (records.length ? 1 : 0)
+        const remaining = factoryList.filter(f => !doneSet.has(norm(f.factory_name)))
 
-        // Filter out packets that are fully done (in case the API still
-        // returns them for any reason)
-        if (done >= total && p.status === 'completed') continue
+        // Skip packets that have nothing left to do.
+        if (!remaining.length) continue
 
         const badge =
           p.status === 'ingestion_started' ? '⏳ in progress'
           : p.status === 'completed'        ? '🧩 partial'
           : '📦 assigned'
 
-        const header =
-          `**#${p.id}** · **${p.team_name}** · ${p.sd_card_count || 0} cards · ${badge}` +
-          (total > 1 ? ` · ${done}/${total} factories` : '')
+        // Compute total remaining cards + packages for the header.
+        const totalRemainCards = remaining.reduce((s, f) => s + (Number(f.count) || 0), 0)
+        const totalRemainPkgs  = remaining.reduce((s, f) => s + (Number(f.num_packages) || 0), 0)
 
-        const factoryLines = factoryList.length
-          ? factoryList.map(f => {
-              const check = doneSet.has(norm(f.factory_name)) ? '✅' : '⬜'
-              return `  ${check} ${f.factory_name}`
-            }).join('\n')
-          : ''
+        const header =
+          `**#${p.id}** · **${p.team_name}** · ${badge} · ` +
+          `${done}/${total} done · **${remaining.length} factor${remaining.length === 1 ? 'y' : 'ies'} left**` +
+          `\n   📅 Arrived ${fmtDate(p.date_received)}` +
+          ` · 💾 ${totalRemainCards || p.sd_card_count || 0} cards left` +
+          (totalRemainPkgs ? ` · 📦 ${totalRemainPkgs} pkg left` : '')
+
+        const factoryLines = remaining.map(f => {
+          const parts = []
+          parts.push(`💾 ${Number(f.count) || 0} cards`)
+          if (Number(f.num_packages) > 0) parts.push(`📦 ${Number(f.num_packages)} pkg`)
+          if (Number(f.missing)      > 0) parts.push(`⚠️ ${Number(f.missing)} missing`)
+          if (f.deployment_date)          parts.push(`📅 deploy ${fmtDate(f.deployment_date)}`)
+          return `  ⬜ **${f.factory_name}** · ${parts.join(' · ')}`
+        }).join('\n')
 
         sections.push(factoryLines ? `${header}\n${factoryLines}` : header)
       }
@@ -319,10 +391,16 @@ async function handleListCommand(interaction) {
         return
       }
 
+      const code = INGESTION_ROSTER.byName.get(person.toLowerCase())
+      const heading = code
+        ? `📋 **Packets assigned to ${person}** (${code}) — ${sections.length} packet${sections.length === 1 ? '' : 's'} pending`
+        : `📋 **Packets assigned to ${person}** — ${sections.length} packet${sections.length === 1 ? '' : 's'} pending`
+
       await interaction.editReply(
-        `📋 **Packets assigned to ${person}** (${sections.length})\n\n${sections.join('\n\n')}\n\n` +
-        `▶️ Start with \`/start <id>\` + details\n` +
-        `▶️ Finish each factory with \`/complete <id>\` — include \`Factory: <name>\``
+        `${heading}\n\n${sections.join('\n\n')}\n\n` +
+        `▶️ Start a packet: \`/start <id>\` + details\n` +
+        `▶️ Finish a factory: \`/complete <id>\` — include \`Factory: <exact name above>\`\n` +
+        `_Completed factories are hidden from this list. Only the pending ones are shown._`
       )
     } catch (err) {
       await interaction.editReply(`❌ ${err.message}`)
@@ -373,10 +451,16 @@ async function handleHelpCommand(interaction) {
   }
 
   if (ch === CH_READY) {
+    const rosterLine = INGESTION_ROSTER.entries.length
+      ? `\n\n**Roster codes** (you can type either the code or the name):\n` +
+        INGESTION_ROSTER.entries.map(e => `  • **${e.code}** → ${e.name}`).join('\n')
+      : ''
     await interaction.editReply(
       `**🚀 #ready_to_ingest — Assign a packet (ingestion lead only)**\n\n` +
       `First use \`/list\` to see packets awaiting assignment, then send:\n` +
-      `\`\`\`\n/assign 42\nTeam: Dukaan\nCount: 192\nAssign to: Aslam\nDate: ${today()}\n\`\`\`` +
+      `\`\`\`\n/assign 42\nTeam: Dukaan\nCount: 192\nAssign to: 001\nDate: ${today()}\n\`\`\`` +
+      `\n_Tip: \`Assign to: 001\` is the same as \`Assign to: Aslam\` — codes help avoid typos._` +
+      rosterLine +
       `\n\n_The assignee will see the packet in their own **#${INGEST_PREFIX}<name>** channel._`
     )
     return
@@ -681,22 +765,36 @@ client.on(Events.MessageCreate, async (msg) => {
       return
     }
 
-    const packetId    = assignId
-    const kv          = parseKV(lines.slice(1))
-    const team_name   = kv['team']        || kv['team_name']
-    const count       = kv['count']       || kv['sd_count'] || kv['sd_card_count']
-    const assign_to   = kv['assign_to']   || kv['assign to'] || kv['assignee'] || kv['to']
-    const date_raw    = kv['date']        || kv['assigned_date'] || kv['assign_date'] || ''
-    const date        = date_raw || today()
+    const packetId      = assignId
+    const kv            = parseKV(lines.slice(1))
+    const team_name     = kv['team']        || kv['team_name']
+    const count         = kv['count']       || kv['sd_count'] || kv['sd_card_count']
+    const assign_to_raw = kv['assign_to']   || kv['assign to'] || kv['assignee'] || kv['to']
+    const date_raw      = kv['date']        || kv['assigned_date'] || kv['assign_date'] || ''
+    const date          = date_raw || today()
+
+    // Resolve code (e.g. "001") or name (e.g. "aslam") → canonical name
+    // (e.g. "Aslam"). Unknown inputs fall through unchanged.
+    const assign_to = resolveAssignee(assign_to_raw)
 
     const assignErrors = []
-    if (!team_name) assignErrors.push(`• **Team** is missing — add: \`Team: Dukaan\``)
-    if (!assign_to) assignErrors.push(`• **Assign to** is missing — add: \`Assign to: Aslam\``)
+    if (!team_name)     assignErrors.push(`• **Team** is missing — add: \`Team: Dukaan\``)
+    if (!assign_to_raw) assignErrors.push(`• **Assign to** is missing — add: \`Assign to: Aslam\` (or a code like \`001\`)`)
+
+    // If a roster is configured but the assignee isn't in it, warn loudly
+    // before writing bad data to the DB.
+    if (assign_to_raw && INGESTION_ROSTER.entries.length && !isRosterKey(assign_to_raw)) {
+      const roster = INGESTION_ROSTER.entries.map(e => `**${e.code}** → ${e.name}`).join(' · ')
+      assignErrors.push(
+        `• **Assign to \`${assign_to_raw}\`** is not in the roster.\n   Recognised codes / names: ${roster}`
+      )
+    }
 
     if (assignErrors.length) {
       await msg.reply(
         `❌ **Fix these issues and try again:**\n${assignErrors.join('\n')}\n\n` +
-        `**Full format:**\n\`\`\`\n/assign 42\nTeam: Dukaan\nCount: 192\nAssign to: Aslam\nDate: ${today()}\n\`\`\``
+        `**Full format:**\n\`\`\`\n/assign 42\nTeam: Dukaan\nCount: 192\nAssign to: 001\nDate: ${today()}\n\`\`\`` +
+        `\n_You can also type \`Assign to: Aslam\` directly. Codes are just for faster typing._`
       )
       return
     }
@@ -709,7 +807,8 @@ client.on(Events.MessageCreate, async (msg) => {
         body: JSON.stringify({
           event_type: 'collected_for_ingestion',
           event_data: {
-            assigned_to:  assign_to,
+            assigned_to:  assign_to,       // canonical name goes to DB
+            assigned_code: INGESTION_ROSTER.byName.get(assign_to.toLowerCase()) || null,
             assigned_by:  msg.author.username || 'Ingestion Lead',
             team_name:    team_name || null,
             sd_card_count: count ? Number(count) : null,
@@ -721,11 +820,14 @@ client.on(Events.MessageCreate, async (msg) => {
 
       const countNote = count ? ` · 💾 ${count} cards` : ''
       const photoNote = photos.length ? `\n📸 ${photos.length} photo(s) attached.` : ''
+      const code      = INGESTION_ROSTER.byName.get(assign_to.toLowerCase())
+      const codeNote  = code ? ` (${code})` : ''
+      const chanSuffix = assign_to.toLowerCase().split(/\s+/)[0]
 
       await msg.reply(
         `✅ **Packet #${packetId} assigned!**\n` +
-        `📦 **${team_name}**${countNote} · 👤 **${assign_to}** · 📅 ${fmtDate(date)}${photoNote}\n\n` +
-        `▶️ **${assign_to}** — check \`/list\` inside your **#${INGEST_PREFIX}${assign_to.toLowerCase().split(/\s+/)[0]}** channel.`
+        `📦 **${team_name}**${countNote} · 👤 **${assign_to}**${codeNote} · 📅 ${fmtDate(date)}${photoNote}\n\n` +
+        `▶️ **${assign_to}** — check \`/list\` inside your **#${INGEST_PREFIX}${chanSuffix}** channel.`
       )
     } catch (err) {
       await msg.reply(`❌ Failed: ${err.message}`)

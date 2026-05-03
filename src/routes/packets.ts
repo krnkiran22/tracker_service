@@ -356,15 +356,27 @@ router.patch('/:id', async (req: Request, res: Response) => {
       }
 
       // Parse the packet's factory_entries to know how many distinct
-      // factories this packet was counted as having.
+      // factories this packet was counted as having. De-duplicate by
+      // normalised factory_name — sometimes /count accidentally records
+      // the same factory twice, and we want completion math to reflect
+      // the number of UNIQUE factories (one ingestion_record per name).
       type FactoryEntry = { factory_name: string; deployment_date?: string | null }
-      let factoryList: FactoryEntry[] = []
+      let rawFactoryList: FactoryEntry[] = []
       try {
         const raw = JSON.parse(packet.factory_entries || '[]')
-        factoryList = Array.isArray(raw) ? raw : []
+        rawFactoryList = Array.isArray(raw) ? raw : []
       } catch { /* treat as no factory list */ }
 
       const norm = (s: string) => String(s || '').trim().toLowerCase()
+
+      const seenFactoryKeys = new Set<string>()
+      const factoryList: FactoryEntry[] = []
+      for (const f of rawFactoryList) {
+        const key = norm(f.factory_name)
+        if (!key || seenFactoryKeys.has(key)) continue
+        seenFactoryKeys.add(key)
+        factoryList.push(f)
+      }
 
       // Multi-factory packet — require the supplied factory to match one
       // of the counted factories. Single-factory packets (or legacy
