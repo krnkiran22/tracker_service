@@ -653,8 +653,22 @@ export async function getIngestionRecords(): Promise<IngestionRecord[]> {
 
 export async function getIngestionRecordByPacketId(packetId: number): Promise<IngestionRecord | null> {
   const db = getPool()
-  const res = await db.query(`SELECT * FROM ingestion_records WHERE packet_id = $1`, [packetId])
+  const res = await db.query(
+    `SELECT * FROM ingestion_records WHERE packet_id = $1 ORDER BY created_at ASC LIMIT 1`,
+    [packetId]
+  )
   return res.rows[0] ?? null
+}
+
+// All ingestion records for a single packet, oldest → newest.
+// A multi-factory packet has one ingestion_records row per factory.
+export async function getIngestionRecordsByPacket(packetId: number): Promise<IngestionRecord[]> {
+  const db = getPool()
+  const res = await db.query(
+    `SELECT * FROM ingestion_records WHERE packet_id = $1 ORDER BY created_at ASC`,
+    [packetId]
+  )
+  return res.rows
 }
 
 export async function updateIngestionRecord(id: number, fields: Partial<Omit<IngestionRecord, 'id' | 'created_at'>>): Promise<IngestionRecord | null> {

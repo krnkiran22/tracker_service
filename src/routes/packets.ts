@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express'
 import {
   insertPacket, getPackets, getPacketsByStatuses, getPacketsByAssignee, getPacketById,
   updatePacketStatus, updatePacket, deletePacket,
-  insertIngestionRecord, getIngestionRecordByPacketId,
+  insertIngestionRecord, getIngestionRecordByPacketId, getIngestionRecordsByPacket,
   insertSdEvent, getSdEventsByPacketId,
   insertTransaction, getCompletedPacketsWithRecords,
 } from '../db'
@@ -265,16 +265,26 @@ router.post('/:id/events', async (req: Request, res: Response) => {
 })
 
 // GET /api/packets/:id
+// Returns:
+//   packet             — row
+//   ingestion          — legacy: first ingestion record for this packet (or null)
+//   ingestion_records  — NEW: every ingestion record (one row per factory)
+//   events             — full event audit trail
 router.get('/:id', async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id)
     const packet = await getPacketById(id)
     if (!packet) { res.status(404).json({ error: 'Not found' }); return }
-    const [ingestion, events] = await Promise.all([
-      getIngestionRecordByPacketId(id),
+    const [ingestionRecords, events] = await Promise.all([
+      getIngestionRecordsByPacket(id),
       getSdEventsByPacketId(id),
     ])
-    res.json({ packet, ingestion, events })
+    res.json({
+      packet,
+      ingestion:          ingestionRecords[0] ?? null,  // legacy shape
+      ingestion_records:  ingestionRecords,
+      events,
+    })
   } catch (err) {
     res.status(500).json({ error: String(err) })
   }
@@ -317,10 +327,14 @@ router.patch('/:id', async (req: Request, res: Response) => {
     }
 
     if (action === 'complete') {
-      // Allow completion from old `processing`, the logistics handoff
-      // `collected_for_ingestion`, and the newer `ingestion_started` state
-      // (set by the Discord bot /start command).
-      const completableStatuses = ['processing', 'collected_for_ingestion', 'ingestion_started']
+      // Allow completion from:
+      //   - old `processing` state
+      //   - logistics-pipeline `collected_for_ingestion`
+      //   - newer `ingestion_started` (set by Discord /start)
+      //   - `completed` — ONLY if the packet has more factories pending.
+      //     This lets a multi-factory packet that was prematurely marked
+      //     `completed` still accept its remaining factory completions.
+      const completableStatuses = ['processing', 'collected_for_ingestion', 'ingestion_started', 'completed']
       if (!completableStatuses.includes(packet.status)) {
         res.status(400).json({ error: 'Packet cannot be completed from its current state' })
         return
@@ -331,14 +345,65 @@ router.patch('/:id', async (req: Request, res: Response) => {
         red_cards_count, ingested_by, deployment_date, notes,
       } = ingestionData
 
-      // industry is optional for the new logistics flow
-      const industry = ingestionData.industry || packet.factory || 'General'
+      // industry = factory for this ingestion record. Prefer an explicit
+      // `industry` field, then `factory_name`, then fall back to the
+      // packet's own factory column (legacy single-factory packets).
+      const industry = ingestionData.industry || ingestionData.factory_name || packet.factory || 'General'
 
       if (!team_name || !ingested_by || !deployment_date) {
         res.status(400).json({ error: 'Missing ingestion fields' })
         return
       }
 
+      // Parse the packet's factory_entries to know how many distinct
+      // factories this packet was counted as having.
+      type FactoryEntry = { factory_name: string; deployment_date?: string | null }
+      let factoryList: FactoryEntry[] = []
+      try {
+        const raw = JSON.parse(packet.factory_entries || '[]')
+        factoryList = Array.isArray(raw) ? raw : []
+      } catch { /* treat as no factory list */ }
+
+      const norm = (s: string) => String(s || '').trim().toLowerCase()
+
+      // Multi-factory packet — require the supplied factory to match one
+      // of the counted factories. Single-factory packets (or legacy
+      // packets with empty factory_entries) skip this check.
+      if (factoryList.length > 1) {
+        const match = factoryList.find(f => norm(f.factory_name) === norm(industry))
+        if (!match) {
+          res.status(400).json({
+            error:
+              `Factory "${industry}" is not part of packet #${id}. ` +
+              `Factories on this packet: ${factoryList.map(f => f.factory_name).join(', ')}`,
+          })
+          return
+        }
+      }
+
+      // Look up everything already ingested against this packet and
+      // reject a duplicate completion of the same factory.
+      const existingRecords = await getIngestionRecordsByPacket(id)
+      const alreadyDone     = existingRecords.find(r => norm(r.industry) === norm(industry))
+      if (alreadyDone) {
+        res.status(400).json({
+          error: `Factory "${industry}" for packet #${id} is already completed.`,
+        })
+        return
+      }
+
+      // If the packet is ALREADY `completed` but the caller is trying to
+      // add yet another factory, confirm there's actually something still
+      // outstanding (otherwise the pipeline is truly done).
+      const totalExpected = factoryList.length || 1
+      if (packet.status === 'completed' && existingRecords.length >= totalExpected) {
+        res.status(400).json({
+          error: `All ${totalExpected} factor${totalExpected === 1 ? 'y' : 'ies'} for packet #${id} are already completed.`,
+        })
+        return
+      }
+
+      // Insert the ingestion record for this factory
       const record = await insertIngestionRecord({
         packet_id:       id,
         team_name,
@@ -352,16 +417,41 @@ router.patch('/:id', async (req: Request, res: Response) => {
         notes: notes || null,
       })
 
-      const updatedPacket = await updatePacketStatus(id, 'completed')
+      const completedCount = existingRecords.length + 1 // +1 for the row we just inserted
+      const allDone        = completedCount >= totalExpected
 
-      sendIngestionCompleteEmail(updatedPacket!, record).catch(err =>
+      // Compute the human-readable list of factories that still need
+      // ingestion (used by the Discord bot to prompt the user).
+      const remainingFactories = factoryList
+        .filter(f => norm(f.factory_name) !== norm(industry))
+        .filter(f => !existingRecords.some(r => norm(r.industry) === norm(f.factory_name)))
+        .map(f => f.factory_name)
+
+      // Flip packet → completed only once every expected factory is in.
+      let updatedPacket = packet
+      if (allDone && packet.status !== 'completed') {
+        const flipped = await updatePacketStatus(id, 'completed')
+        if (flipped) updatedPacket = flipped
+      }
+
+      // Email / WhatsApp notifications fire for every factory completion
+      // so each POC knows which factory just finished.
+      sendIngestionCompleteEmail(updatedPacket, record).catch(err =>
         console.error('sendIngestionCompleteEmail failed:', err)
       )
-      waSendIngestionComplete(updatedPacket! as any, record).catch(err =>
+      waSendIngestionComplete(updatedPacket as any, record).catch(err =>
         console.error('waSendIngestionComplete failed:', err)
       )
 
-      res.json({ packet: updatedPacket, ingestion: record })
+      res.json({
+        packet:              updatedPacket,
+        ingestion:           record,
+        factory_completed:   industry,
+        completed_factories: completedCount,
+        total_factories:     totalExpected,
+        all_factories_done:  allDone,
+        remaining_factories: remainingFactories,
+      })
       return
     }
 

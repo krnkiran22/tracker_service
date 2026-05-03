@@ -249,23 +249,80 @@ async function handleListCommand(interaction) {
   const person = ingestPersonFromChannel(chLower)
   if (person) {
     try {
+      // Show active packets (assigned + in progress) AND any `completed`
+      // packets that still have remaining factories to ingest. The last
+      // case exists because a multi-factory packet only leaves the
+      // "completed" status once every factory has an ingestion record.
       const packets = await api(
         `/api/packets?assigned_to=${encodeURIComponent(person)}` +
-        `&statuses=collected_for_ingestion,ingestion_started`
+        `&statuses=collected_for_ingestion,ingestion_started,completed`
       )
       if (!packets.length) {
         await interaction.editReply(`✅ No packets currently assigned to **${person}**.`)
         return
       }
-      const lines = packets.map(p => {
-        const badge = p.status === 'ingestion_started' ? '⏳ in progress'
-                    : '📦 assigned'
-        return `**#${p.id}** · **${p.team_name}** · ${p.sd_card_count || 0} cards · ${badge}`
-      }).join('\n')
+
+      // For each packet, pull detail so we can show factory completion
+      // progress inline. We do this in parallel to keep latency low.
+      const details = await Promise.all(
+        packets.map(async p => {
+          try {
+            const detail = await api(`/api/packets/${p.id}`)
+            return { packet: p, detail }
+          } catch { return { packet: p, detail: null } }
+        })
+      )
+
+      const sections = []
+      for (const { packet: p, detail } of details) {
+        let factoryList = []
+        try { factoryList = JSON.parse(p.factory_entries || '[]') } catch {}
+
+        const records = Array.isArray(detail?.ingestion_records)
+          ? detail.ingestion_records
+          : detail?.ingestion
+            ? [detail.ingestion]
+            : []
+
+        const norm = s => String(s || '').trim().toLowerCase()
+        const doneSet = new Set(records.map(r => norm(r.industry)))
+        const total = factoryList.length || 1
+        const done  = factoryList.length
+          ? factoryList.filter(f => doneSet.has(norm(f.factory_name))).length
+          : (records.length ? 1 : 0)
+
+        // Filter out packets that are fully done (in case the API still
+        // returns them for any reason)
+        if (done >= total && p.status === 'completed') continue
+
+        const badge =
+          p.status === 'ingestion_started' ? '⏳ in progress'
+          : p.status === 'completed'        ? '🧩 partial'
+          : '📦 assigned'
+
+        const header =
+          `**#${p.id}** · **${p.team_name}** · ${p.sd_card_count || 0} cards · ${badge}` +
+          (total > 1 ? ` · ${done}/${total} factories` : '')
+
+        const factoryLines = factoryList.length
+          ? factoryList.map(f => {
+              const check = doneSet.has(norm(f.factory_name)) ? '✅' : '⬜'
+              return `  ${check} ${f.factory_name}`
+            }).join('\n')
+          : ''
+
+        sections.push(factoryLines ? `${header}\n${factoryLines}` : header)
+      }
+
+      if (!sections.length) {
+        await interaction.editReply(`✅ No pending work for **${person}** right now.`)
+        return
+      }
+
       await interaction.editReply(
-        `📋 **Packets assigned to ${person}** (${packets.length})\n\n${lines}\n\n` +
-        `▶️ Start with \`/start 42\` + details\n` +
-        `▶️ Finish with \`/complete 42\` + counts`
+        `📋 **Packets assigned to ${person}** (${sections.length})\n\n${sections.join('\n\n')}\n\n` +
+        `▶️ Start with \`/start <id>\` + details\n` +
+        `▶️ Finish each factory with \`/complete <id>\` — include \`Factory: <name>\``
       )
     } catch (err) {
       await interaction.editReply(`❌ ${err.message}`)
@@ -809,12 +866,13 @@ client.on(Events.MessageCreate, async (msg) => {
         }).catch(err => console.warn(`update_photos for #${packetId} failed: ${err.message}`))
       }
 
-      await api(`/api/packets/${packetId}`, {
+      const completeRes = await api(`/api/packets/${packetId}`, {
         method: 'PATCH',
         body: JSON.stringify({
           action:          'complete',
           team_name,
           industry:        factory_name,
+          factory_name,
           actual_count:    Number(rawCount),
           missing_count:   Number(rawMissing),
           extra_count:     Number(rawExtra),
@@ -838,18 +896,48 @@ client.on(Events.MessageCreate, async (msg) => {
             extra_count:     Number(rawExtra),
             red_cards_count: Number(rawRed),
             deployment_date,
+            all_factories_done:  completeRes?.all_factories_done ?? null,
+            completed_factories: completeRes?.completed_factories ?? null,
+            total_factories:     completeRes?.total_factories ?? null,
           },
         }),
       }).catch(err => console.warn(`event log for completion #${packetId} failed: ${err.message}`))
 
       const photoNote = photos.length ? `\n📸 ${photos.length} photo(s) attached.` : ''
 
+      // Multi-factory packets: tell the user what's still pending so they
+      // don't think the packet is fully closed after one /complete.
+      const allDone = completeRes?.all_factories_done
+      const done    = completeRes?.completed_factories ?? 1
+      const total   = completeRes?.total_factories     ?? 1
+      const remainingList = Array.isArray(completeRes?.remaining_factories)
+        ? completeRes.remaining_factories
+        : []
+
+      let progressLine = ''
+      if (total > 1) {
+        if (allDone) {
+          progressLine =
+            `\n🎉 **All ${total} factories done — packet #${packetId} is fully completed!**`
+        } else {
+          progressLine =
+            `\n📊 Progress: **${done} / ${total}** factories done` +
+            (remainingList.length
+              ? `\n⏳ Still pending: ${remainingList.map(f => `**${f}**`).join(', ')}` +
+                `\n▶️ When ready, run \`/complete ${packetId}\` again with \`Factory: <name>\` for each remaining one.`
+              : '')
+        }
+      } else if (allDone) {
+        progressLine = `\n🎉 **Packet #${packetId} fully completed!**`
+      }
+
       await msg.reply(
-        `✅ **Packet #${packetId} ingestion complete!**\n` +
+        `✅ **Packet #${packetId} — factory "${factory_name}" completed!**\n` +
         `👤 ${person} · 📦 **${team_name}** · 🏭 ${factory_name}\n` +
         `💾 ${rawCount} actual · ⚠️ ${rawMissing} missing · ➕ ${rawExtra} extra · 🔴 ${rawRed} red\n` +
-        `📅 Deployed ${fmtDate(deployment_date)}${photoNote}\n\n` +
-        `🔗 ${TRACKER_URL}`
+        `📅 Deployed ${fmtDate(deployment_date)}${photoNote}` +
+        progressLine +
+        `\n\n🔗 ${TRACKER_URL}`
       )
     } catch (err) {
       await msg.reply(`❌ Failed: ${err.message}`)
