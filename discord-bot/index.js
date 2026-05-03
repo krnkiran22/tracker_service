@@ -133,10 +133,51 @@ const client = new Client({
   ],
 })
 
+// Track when the bot came online so the health-ping reply can show uptime.
+let botStartedAt = null
+
 client.once(Events.ClientReady, async (c) => {
+  botStartedAt = new Date()
   console.log(`✅ Bot online as ${c.user.tag}`)
   await registerCommands(c)
 })
+
+// Human-friendly "2h 15m 30s" from a ms duration.
+function formatUptime(ms) {
+  const total = Math.floor(ms / 1000)
+  const d = Math.floor(total / 86400)
+  const h = Math.floor((total % 86400) / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  const parts = []
+  if (d) parts.push(`${d}d`)
+  if (h) parts.push(`${h}h`)
+  if (m) parts.push(`${m}m`)
+  parts.push(`${s}s`)
+  return parts.join(' ')
+}
+
+// Check if a raw message is a bot-health ping — i.e. the bot is @-mentioned
+// and (after stripping the mention) the leftover text is empty or a short
+// greeting like "hi", "hey", "ping", "are you up?".
+function isHealthPing(msg, botId) {
+  if (!msg.mentions?.has?.(botId)) return false
+  // Strip the <@botId> token and any surrounding whitespace/punctuation
+  const stripped = msg.content
+    .replace(new RegExp(`<@!?${botId}>`, 'g'), '')
+    .trim()
+    .toLowerCase()
+    .replace(/[!?.,]+$/, '')
+  if (!stripped) return true // pure mention
+  if (stripped.startsWith('/')) return false // leave commands alone
+  const greetings = [
+    'hi', 'hii', 'hiii', 'hello', 'hey', 'heyy', 'yo',
+    'ping', 'alive', 'status', 'health', 'up',
+    'are you up', 'are you alive', 'are you there', 'you there',
+    'sup', 'hola',
+  ]
+  return greetings.some(g => stripped === g || stripped.startsWith(g + ' '))
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // /list — channel-aware
@@ -330,6 +371,28 @@ const photoPending = new Map() // replyMsgId → { packetId, type }
 
 client.on(Events.MessageCreate, async (msg) => {
   if (msg.author.bot) return
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Health ping — @-mention the bot with an empty message or a greeting like
+  // "hi", "hey", "are you up?" and it replies confirming it's alive + uptime.
+  // Works in every channel. Must come first so it doesn't get shadowed by
+  // the command handlers below.
+  // ══════════════════════════════════════════════════════════════════════════
+  if (client.user && isHealthPing(msg, client.user.id)) {
+    const uptime = botStartedAt
+      ? formatUptime(Date.now() - botStartedAt.getTime())
+      : 'just now'
+    try {
+      await msg.reply(
+        `👋 Yes, I'm still up and working!\n` +
+        `⏱️ Uptime: **${uptime}** · 🛰️ Gateway ping: **${client.ws.ping}ms**\n` +
+        `▶️ Run \`/help\` in any channel to see what I can do here.`
+      )
+    } catch (err) {
+      console.warn('health ping reply failed:', err.message)
+    }
+    return
+  }
 
   const text  = msg.content.trim()
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
