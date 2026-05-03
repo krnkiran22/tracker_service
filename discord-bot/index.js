@@ -1,6 +1,9 @@
+// The bot runs as a child process inside the main backend Railway service
+// (spawned by src/index.ts). It inherits env vars from the backend, so all
+// network keep-alive is handled by the backend's HTTP server — this process
+// only needs to maintain the Discord gateway connection.
 require('dotenv').config()
 
-const http = require('http')
 const {
   Client, GatewayIntentBits, Events,
   REST, Routes,
@@ -9,11 +12,6 @@ const {
 const CLIENT_ID   = process.env.CLIENT_ID  || '1497976137345667173'
 const BACKEND     = process.env.BACKEND_URL || 'https://trackerservice-production.up.railway.app'
 const TRACKER_URL = 'https://sd-tracker.vercel.app'
-const PORT        = Number(process.env.PORT || 3000)
-// SELF_URL = this bot service's own public URL on Railway — the bot will ping
-// its own /health every 14 minutes to prevent Railway's idle shutdown.
-// Example: https://sd-tracker-bot-production.up.railway.app
-const SELF_URL    = process.env.SELF_URL || ''
 
 // ── Channel name config ───────────────────────────────────────────────────────
 // Logistics channels (one command per channel)
@@ -893,67 +891,12 @@ client.on(Events.MessageCreate, async (msg) => {
   }
 })
 
-// ══════════════════════════════════════════════════════════════════════════════
-// Keep-alive HTTP server
-// Railway sleeps services without inbound HTTP traffic. Discord's WebSocket
-// alone isn't enough to keep the container awake, so we:
-//   1. Expose a tiny HTTP /health endpoint on $PORT (Railway sets this)
-//   2. Self-ping that endpoint every 14 minutes (same pattern the main
-//      backend uses in src/index.ts)
-//   3. Also ping the main backend's /health so both services keep each
-//      other warm — useful when the bot talks to a cold backend.
-// ══════════════════════════════════════════════════════════════════════════════
-const keepAliveServer = http.createServer((req, res) => {
-  if (req.url === '/health' || req.url === '/') {
-    const uptimeMs = botStartedAt ? Date.now() - botStartedAt.getTime() : 0
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({
-      ok:         true,
-      bot_ready:  client.isReady(),
-      uptime_ms:  uptimeMs,
-      uptime:     formatUptime(uptimeMs),
-      gateway_ping: client.ws?.ping ?? null,
-      ts:         new Date().toISOString(),
-    }))
-    return
-  }
-  res.writeHead(404, { 'Content-Type': 'text/plain' })
-  res.end('Not found')
+// ── Login ─────────────────────────────────────────────────────────────────────
+// No HTTP server or keep-alive loop needed here — this bot runs as a child
+// of the main backend service which already exposes /health on Railway's
+// assigned PORT and self-pings every 14 minutes. The container staying warm
+// keeps us warm too.
+client.login(process.env.DISCORD_TOKEN).catch(err => {
+  console.error('✗ Discord login failed:', err)
+  process.exit(1) // let the parent (backend src/index.ts) auto-restart us
 })
-
-keepAliveServer.listen(PORT, () => {
-  console.log(`✓ Keep-alive HTTP server listening on :${PORT}`)
-})
-
-function startKeepAlive() {
-  const INTERVAL_MS = 14 * 60 * 1000 // 14 minutes
-
-  setInterval(async () => {
-    // Ping ourselves (only if SELF_URL is configured)
-    if (SELF_URL) {
-      try {
-        const res = await fetch(`${SELF_URL.replace(/\/$/, '')}/health`)
-        console.log(`[keep-alive] self /health → ${res.status}`)
-      } catch (err) {
-        console.warn(`[keep-alive] self ping failed:`, err.message)
-      }
-    }
-    // Also ping the main backend so it stays warm for our API calls
-    try {
-      const res = await fetch(`${BACKEND}/health`)
-      console.log(`[keep-alive] backend /health → ${res.status}`)
-    } catch (err) {
-      console.warn(`[keep-alive] backend ping failed:`, err.message)
-    }
-  }, INTERVAL_MS)
-
-  console.log(
-    `✓ Keep-alive pinging ` +
-    (SELF_URL ? `${SELF_URL}/health + ` : `(SELF_URL not set) `) +
-    `${BACKEND}/health every 14 min`
-  )
-}
-
-startKeepAlive()
-
-client.login(process.env.DISCORD_TOKEN)

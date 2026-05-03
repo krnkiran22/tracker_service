@@ -8,7 +8,8 @@ import packetsRouter from './routes/packets'
 import authRouter from './routes/auth'
 import adminRouter from './routes/admin'
 import eventsRouter from './routes/events'
-import { execSync as _execSync } from 'child_process'
+import { execSync as _execSync, spawn, type ChildProcess } from 'child_process'
+import path from 'path'
 import { initWhatsApp, getIsReady } from './whatsapp'
 import * as WhatsAppModule from './whatsapp'
 import QRCode from 'qrcode'
@@ -140,6 +141,60 @@ function startKeepAlive() {
   console.log(`✓ Keep-alive pinging ${selfUrl}/health every 14 min`)
 }
 
+// ── Discord bot — runs as a child process inside this same Railway service ───
+// The bot is a plain CommonJS script at discord-bot/index.js. Spawning it as
+// a subprocess lets us share the container (single Railway service for both
+// backend API and bot) while isolating crashes — if the bot dies we restart
+// it without taking down the API.
+let discordBot: ChildProcess | null = null
+let botRestartAttempts = 0
+
+function startDiscordBot() {
+  if (!process.env.DISCORD_TOKEN) {
+    console.warn('⚠ DISCORD_TOKEN not set — skipping Discord bot startup')
+    return
+  }
+  // dist/index.js lives at <root>/dist/ at runtime → the bot is at ../discord-bot
+  const botPath = path.resolve(__dirname, '..', 'discord-bot', 'index.js')
+  console.log(`▶ Starting Discord bot: ${botPath}`)
+
+  discordBot = spawn(process.execPath, [botPath], {
+    stdio: 'inherit',            // stream bot logs into Railway logs
+    env: process.env as NodeJS.ProcessEnv,
+    cwd: path.resolve(__dirname, '..'),
+  })
+
+  discordBot.on('spawn', () => {
+    botRestartAttempts = 0
+    console.log(`✓ Discord bot process spawned (pid=${discordBot?.pid})`)
+  })
+
+  discordBot.on('error', (err) => {
+    console.error('✗ Discord bot spawn error:', err)
+  })
+
+  discordBot.on('exit', (code, signal) => {
+    console.warn(`⚠ Discord bot exited (code=${code}, signal=${signal})`)
+    discordBot = null
+    // Back-off restart: 5s, 10s, 20s, 40s, max 60s, then steady
+    botRestartAttempts++
+    const delay = Math.min(5000 * Math.pow(2, Math.min(botRestartAttempts - 1, 5)), 60_000)
+    console.log(`⟳ Restarting Discord bot in ${delay / 1000}s (attempt #${botRestartAttempts})`)
+    setTimeout(startDiscordBot, delay)
+  })
+}
+
+// Clean shutdown — kill the bot if the parent is shutting down
+;['SIGINT', 'SIGTERM'].forEach(sig => {
+  process.on(sig, () => {
+    if (discordBot && !discordBot.killed) {
+      console.log(`Received ${sig} — terminating Discord bot subprocess`)
+      discordBot.kill('SIGTERM')
+    }
+    process.exit(0)
+  })
+})
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 async function start() {
   try {
@@ -154,6 +209,7 @@ async function start() {
     console.log(`✓ Build AI Tracker backend running on port ${PORT}`)
     startKeepAlive()
     initWhatsApp()
+    startDiscordBot()
   })
 }
 
