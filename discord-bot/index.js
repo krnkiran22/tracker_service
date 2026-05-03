@@ -1,5 +1,6 @@
 require('dotenv').config()
 
+const http = require('http')
 const {
   Client, GatewayIntentBits, Events,
   REST, Routes,
@@ -8,6 +9,11 @@ const {
 const CLIENT_ID   = process.env.CLIENT_ID  || '1497976137345667173'
 const BACKEND     = process.env.BACKEND_URL || 'https://trackerservice-production.up.railway.app'
 const TRACKER_URL = 'https://sd-tracker.vercel.app'
+const PORT        = Number(process.env.PORT || 3000)
+// SELF_URL = this bot service's own public URL on Railway — the bot will ping
+// its own /health every 14 minutes to prevent Railway's idle shutdown.
+// Example: https://sd-tracker-bot-production.up.railway.app
+const SELF_URL    = process.env.SELF_URL || ''
 
 // ── Channel name config ───────────────────────────────────────────────────────
 // Logistics channels (one command per channel)
@@ -188,12 +194,17 @@ function isHealthPing(msg, botId) {
 //                        (collected_for_ingestion + ingestion_started)
 // ══════════════════════════════════════════════════════════════════════════════
 async function handleListCommand(interaction) {
+  // ACK within 3s no matter what — avoids "The application did not respond"
+  // even if the bot just woke from a Railway cold start or the backend is slow.
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply()
+  }
+
   const chName  = interaction.channel?.name || ''
   const chLower = chName.toLowerCase()
 
   // ── #count_repack ───────────────────────────────────────────────────────────
   if (chLower === CH_COUNT) {
-    await interaction.deferReply()
     try {
       const packets = await api('/api/packets?status=received_at_hq')
       if (!packets.length) {
@@ -216,13 +227,9 @@ async function handleListCommand(interaction) {
   // ── #ready_to_ingest (ingestion lead only) ──────────────────────────────────
   if (chLower === CH_READY) {
     if (!isIngestionLead(interaction.user.id)) {
-      await interaction.reply({
-        content: `❌ Only ingestion leads can use \`/list\` here.`,
-        ephemeral: true,
-      })
+      await interaction.editReply(`❌ Only ingestion leads can use \`/list\` here.`)
       return
     }
-    await interaction.deferReply()
     try {
       const packets = await api('/api/packets?status=counted_and_repacked&repack_photos=1')
       if (!packets.length) {
@@ -243,7 +250,6 @@ async function handleListCommand(interaction) {
   // ── #ingest-<name> (per-ingestion-person queue) ─────────────────────────────
   const person = ingestPersonFromChannel(chLower)
   if (person) {
-    await interaction.deferReply()
     try {
       const packets = await api(
         `/api/packets?assigned_to=${encodeURIComponent(person)}` +
@@ -270,24 +276,27 @@ async function handleListCommand(interaction) {
   }
 
   // ── Any other channel — show a hint ─────────────────────────────────────────
-  await interaction.reply({
-    content:
-      `ℹ️ \`/list\` needs to be used in one of:\n` +
-      `• **#${CH_COUNT}** — packets pending count\n` +
-      `• **#${CH_READY}** — packets ready to assign (ingestion lead)\n` +
-      `• **#${INGEST_PREFIX}<your-name>** — packets assigned to you`,
-    ephemeral: true,
-  })
+  await interaction.editReply(
+    `ℹ️ \`/list\` needs to be used in one of:\n` +
+    `• **#${CH_COUNT}** — packets pending count\n` +
+    `• **#${CH_READY}** — packets ready to assign (ingestion lead)\n` +
+    `• **#${INGEST_PREFIX}<your-name>** — packets assigned to you`
+  )
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // /help — channel-aware template display
 // ══════════════════════════════════════════════════════════════════════════════
 async function handleHelpCommand(interaction) {
+  // ACK immediately so we never miss the 3s window.
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply()
+  }
+
   const ch = (interaction.channel?.name || '').toLowerCase()
 
   if (ch === CH_ARRIVAL) {
-    await interaction.reply(
+    await interaction.editReply(
       `**📦 #arrival — Log a new SD card packet**\n\n` +
       `Send a message in this format:\n` +
       `\`\`\`\n/arrival\nTeam: Dukaan\nReceived by: Naresh\nPhone: 9876543210\nDate: ${today()}\n\`\`\`` +
@@ -297,7 +306,7 @@ async function handleHelpCommand(interaction) {
   }
 
   if (ch === CH_COUNT) {
-    await interaction.reply(
+    await interaction.editReply(
       `**✅ #count_repack — Count & Repack a packet**\n\n` +
       `First use \`/list\` to get the packet ID, then send:\n` +
       `\`\`\`\n/count 42\nFactory Name,YYYY-MM-DD,SD Count,Missing,Packages\nCounted by: Naresh\nNotes: optional\n\`\`\`` +
@@ -309,7 +318,7 @@ async function handleHelpCommand(interaction) {
   }
 
   if (ch === CH_READY) {
-    await interaction.reply(
+    await interaction.editReply(
       `**🚀 #ready_to_ingest — Assign a packet (ingestion lead only)**\n\n` +
       `First use \`/list\` to see packets awaiting assignment, then send:\n` +
       `\`\`\`\n/assign 42\nTeam: Dukaan\nCount: 192\nAssign to: Aslam\nDate: ${today()}\n\`\`\`` +
@@ -320,7 +329,7 @@ async function handleHelpCommand(interaction) {
 
   const person = ingestPersonFromChannel(ch)
   if (person) {
-    await interaction.reply(
+    await interaction.editReply(
       `**🎯 #${INGEST_PREFIX}${person} — Your ingestion queue**\n\n` +
       `\`/list\` — show packets assigned to you\n\n` +
       `**When you start a packet:**\n` +
@@ -333,7 +342,7 @@ async function handleHelpCommand(interaction) {
   }
 
   // Generic fallback
-  await interaction.reply(
+  await interaction.editReply(
     `**📖 SD Tracker Bot — Channel Guide**\n\n` +
     `**#${CH_ARRIVAL}** → \`/arrival\` + team/received by/phone/date\n` +
     `**#${CH_COUNT}** → \`/count <id>\` + factory lines\n` +
@@ -883,5 +892,68 @@ client.on(Events.MessageCreate, async (msg) => {
     }
   }
 })
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Keep-alive HTTP server
+// Railway sleeps services without inbound HTTP traffic. Discord's WebSocket
+// alone isn't enough to keep the container awake, so we:
+//   1. Expose a tiny HTTP /health endpoint on $PORT (Railway sets this)
+//   2. Self-ping that endpoint every 14 minutes (same pattern the main
+//      backend uses in src/index.ts)
+//   3. Also ping the main backend's /health so both services keep each
+//      other warm — useful when the bot talks to a cold backend.
+// ══════════════════════════════════════════════════════════════════════════════
+const keepAliveServer = http.createServer((req, res) => {
+  if (req.url === '/health' || req.url === '/') {
+    const uptimeMs = botStartedAt ? Date.now() - botStartedAt.getTime() : 0
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({
+      ok:         true,
+      bot_ready:  client.isReady(),
+      uptime_ms:  uptimeMs,
+      uptime:     formatUptime(uptimeMs),
+      gateway_ping: client.ws?.ping ?? null,
+      ts:         new Date().toISOString(),
+    }))
+    return
+  }
+  res.writeHead(404, { 'Content-Type': 'text/plain' })
+  res.end('Not found')
+})
+
+keepAliveServer.listen(PORT, () => {
+  console.log(`✓ Keep-alive HTTP server listening on :${PORT}`)
+})
+
+function startKeepAlive() {
+  const INTERVAL_MS = 14 * 60 * 1000 // 14 minutes
+
+  setInterval(async () => {
+    // Ping ourselves (only if SELF_URL is configured)
+    if (SELF_URL) {
+      try {
+        const res = await fetch(`${SELF_URL.replace(/\/$/, '')}/health`)
+        console.log(`[keep-alive] self /health → ${res.status}`)
+      } catch (err) {
+        console.warn(`[keep-alive] self ping failed:`, err.message)
+      }
+    }
+    // Also ping the main backend so it stays warm for our API calls
+    try {
+      const res = await fetch(`${BACKEND}/health`)
+      console.log(`[keep-alive] backend /health → ${res.status}`)
+    } catch (err) {
+      console.warn(`[keep-alive] backend ping failed:`, err.message)
+    }
+  }, INTERVAL_MS)
+
+  console.log(
+    `✓ Keep-alive pinging ` +
+    (SELF_URL ? `${SELF_URL}/health + ` : `(SELF_URL not set) `) +
+    `${BACKEND}/health every 14 min`
+  )
+}
+
+startKeepAlive()
 
 client.login(process.env.DISCORD_TOKEN)
