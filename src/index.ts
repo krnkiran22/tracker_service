@@ -76,6 +76,21 @@ app.get('/qr', async (_req, res) => {
   }
 })
 
+// ── WhatsApp QR as JSON (for frontend polling) ───────────────────────────────
+app.get('/qr-json', async (_req, res) => {
+  const qrString = WhatsAppModule.latestQR
+  if (!qrString) {
+    res.json({ ready: getIsReady(), qr: null })
+    return
+  }
+  try {
+    const dataUrl = await QRCode.toDataURL(qrString, { width: 400, margin: 2 })
+    res.json({ ready: false, qr: dataUrl })
+  } catch {
+    res.status(500).json({ error: 'Failed to generate QR image' })
+  }
+})
+
 // ── WhatsApp status + test ────────────────────────────────────────────────────
 app.get('/wa-status', (_req, res) => {
   res.json({
