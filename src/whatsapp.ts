@@ -76,10 +76,29 @@ export async function sendWhatsAppMessage(phone: string, message: string): Promi
   }
 }
 
+// ── CC numbers — always receive a copy of every notification ─────────────────
+// Configurable via CC_PHONES env var (comma-separated). These numbers get
+// every message sent to any team's POC.
+const CC_PHONES: string[] = (
+  process.env.CC_PHONES ||
+  '+16504958737,+15162545202,+919080043250,+919677514444'
+).split(',').map(p => p.trim()).filter(Boolean)
+
 // ── Broadcast to comma-separated phone list ───────────────────────────────────
+// Always also sends to CC_PHONES (carbon copy).
 async function broadcast(phones: string, message: string) {
-  const list = phones.split(',').map(p => p.trim()).filter(Boolean)
-  await Promise.allSettled(list.map(p => sendWhatsAppMessage(p, message)))
+  const pocList = phones.split(',').map(p => p.trim()).filter(Boolean)
+  // Merge POC list + CC list, deduplicating by normalised number
+  const seen = new Set<string>()
+  const allRecipients: string[] = []
+  for (const p of [...pocList, ...CC_PHONES]) {
+    const norm = normalizePhone(p)
+    if (!seen.has(norm)) {
+      seen.add(norm)
+      allRecipients.push(p)
+    }
+  }
+  await Promise.allSettled(allRecipients.map(p => sendWhatsAppMessage(p, message)))
 }
 
 function fmt(d: string) {

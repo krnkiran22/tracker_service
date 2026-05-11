@@ -86,6 +86,42 @@ function ingestPersonFromChannel(channelName) {
   return (canonical || raw).toLowerCase()
 }
 
+// ── Discord message chunker ───────────────────────────────────────────────────
+// Splits a message into ≤1990-char chunks and sends them via editReply +
+// followUp so we never hit Discord's 2000-character limit.
+const DISCORD_LIMIT = 1990
+
+async function sendInChunks(interaction, header, sections, footer = '') {
+  const chunks = []
+  let current = header
+
+  for (const section of sections) {
+    const candidate = current + '\n\n' + section
+    if (candidate.length > DISCORD_LIMIT) {
+      chunks.push(current)
+      current = section
+    } else {
+      current = candidate
+    }
+  }
+
+  if (footer) {
+    const withFooter = current + '\n\n' + footer
+    if (withFooter.length > DISCORD_LIMIT) {
+      chunks.push(current)
+      current = footer
+    } else {
+      current = withFooter
+    }
+  }
+  chunks.push(current)
+
+  await interaction.editReply(chunks[0])
+  for (let i = 1; i < chunks.length; i++) {
+    await interaction.followUp(chunks[i])
+  }
+}
+
 // ── API helper ────────────────────────────────────────────────────────────────
 async function api(path, opts = {}) {
   const res  = await fetch(`${BACKEND}${path}`, {
@@ -255,9 +291,11 @@ async function handleListCommand(interaction) {
       }
       const lines = packets.map(p =>
         `**#${p.id}** · **${p.team_name}** · received ${fmtDate(p.date_received)}${p.entered_by ? ` · by ${p.entered_by}` : ''}`
-      ).join('\n')
-      await interaction.editReply(
-        `📋 **Packets Pending Count & Repack** (${packets.length})\n\n${lines}\n\n` +
+      )
+      await sendInChunks(
+        interaction,
+        `📋 **Packets Pending Count & Repack** (${packets.length})`,
+        lines,
         `▶️ Send \`/count 42\` + factory lines to count a packet`
       )
     } catch (err) {
@@ -278,9 +316,11 @@ async function handleListCommand(interaction) {
         await interaction.editReply('✅ No packets ready to assign.')
         return
       }
-      const lines = packets.map(packetSummaryLine).join('\n')
-      await interaction.editReply(
-        `🚀 **Packets Ready to Assign** (${packets.length})\n\n${lines}\n\n` +
+      const lines = packets.map(packetSummaryLine)
+      await sendInChunks(
+        interaction,
+        `🚀 **Packets Ready to Assign** (${packets.length})`,
+        lines,
         `▶️ Assign with:\n\`\`\`\n/assign 42\nTeam: Dukaan\nCount: 192\nAssign to: Aslam\nDate: ${today()}\n\`\`\``
       )
     } catch (err) {
@@ -396,8 +436,10 @@ async function handleListCommand(interaction) {
         ? `📋 **Packets assigned to ${person}** (${code}) — ${sections.length} packet${sections.length === 1 ? '' : 's'} pending`
         : `📋 **Packets assigned to ${person}** — ${sections.length} packet${sections.length === 1 ? '' : 's'} pending`
 
-      await interaction.editReply(
-        `${heading}\n\n${sections.join('\n\n')}\n\n` +
+      await sendInChunks(
+        interaction,
+        heading,
+        sections,
         `▶️ Start a packet: \`/start <id>\` + details\n` +
         `▶️ Finish a factory: \`/complete <id>\` — include \`Factory: <exact name above>\`\n` +
         `_Completed factories are hidden from this list. Only the pending ones are shown._`
